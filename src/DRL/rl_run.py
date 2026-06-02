@@ -265,6 +265,7 @@ def train_agents_ma(env, trainer, n_episodes=100000, target_score=100000,
             break
 
 def ddqn(**kwargs):
+    
     verbose = kwargs.get('verbose', False)
     load = Load()
     graph, map_information =  load.get_infor()

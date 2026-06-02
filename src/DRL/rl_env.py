@@ -20,7 +20,7 @@ import numpy as np
 from ray.tune.registry import register_env
 from gymnasium.spaces import Box
 import numpy as np
-from configs.systemcfg import map_cfg, mission_cfg, avg_reward, eval
+from configs.systemcfg import map_cfg, mission_cfg, avg_reward, eval, ddqn_cfg
 from configs.config import ParaConfig
 from utils import Load, write_config, write_config_not_fromfile
 import threading
@@ -48,6 +48,7 @@ class ITSEnv(gym.Env):
         self.solution =  ['None']*(mission_cfg['n_vehicle']*mission_cfg['n_miss_per_vec'])
         self.max_selection_turn = [self.data['n_miss_per_vec']]*self.data['n_vehicles']
         self.done = True 
+        self.selection_offset = -1
         if generator==None:
             self.tg = TaskGenerator(15,self.lmap)
         else:
@@ -109,6 +110,8 @@ class ITSEnv(gym.Env):
         infos = {agent_id: {} for agent_id in self._agent_ids}  
         end = time.perf_counter()
         self.max_selection_turn = [self.data['n_miss_per_vec']]*self.data['n_vehicles']
+        if ddqn_cfg['rotate_selection_order'] and self.data['n_vehicles'] > 0:
+            self.selection_offset = (self.selection_offset + 1) % self.data['n_vehicles']
         
         print("genfile {}, reset_object {}".format(file_reset-start, end-file_reset))
         return obs, infos 
@@ -392,7 +395,12 @@ class ITSEnv(gym.Env):
         
         action_out = {}
         
-        for idx, vid in enumerate(action_dict):
+        select_order = list(range(len(action_dict)))
+        if ddqn_cfg['rotate_selection_order'] and len(select_order) > 0:
+            offset = self.selection_offset % len(select_order)
+            select_order = select_order[offset:] + select_order[:offset]
+
+        for idx in select_order:
             if (self.action_memory == 1).all():
                 for v in range(self.data['n_vehicles']):
                     if v not in (list(action_out.keys())):
@@ -416,9 +424,16 @@ class ITSEnv(gym.Env):
                 print("1 loi da xay ra")
                 exit(1)
             if self.action_memory[action] == 1 and states!=None:
-                agent.add_memory(states[list(states.keys())[idx]],action, [-0.01*avg_reward], states[list(states.keys())[idx]], 1)
-                agent.add_global_memory(states[list(states.keys())[idx]],action, [-0.01*avg_reward], states[list(states.keys())[idx]], 1)
-                wrong_action_penalty[idx] += -0.01*avg_reward
+                base_penalty = ddqn_cfg['conflict_penalty_scale'] * avg_reward
+                if ddqn_cfg['conflict_opportunity_aware']:
+                    available = int(np.sum(self.action_memory == 0))
+                    min_available = max(1, int(ddqn_cfg['conflict_min_available']))
+                    penalty = -base_penalty / max(min_available, available)
+                else:
+                    penalty = -base_penalty
+                agent.add_memory(states[list(states.keys())[idx]],action, [penalty], states[list(states.keys())[idx]], 1)
+                agent.add_global_memory(states[list(states.keys())[idx]],action, [penalty], states[list(states.keys())[idx]], 1)
+                wrong_action_penalty[idx] += penalty
                 action_out[idx] = action
                 continue
             if self.action_memory[action] == False:

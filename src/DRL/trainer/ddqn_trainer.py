@@ -220,6 +220,17 @@ class DDQNTrainer:
     def do_modify_reward(self,modify_reward):
         change = [0]*len(modify_reward['state'])
         cnt_completed = 0
+        dep_scale = ddqn_cfg['reward_dep_scale']
+        wait_scale = ddqn_cfg['reward_wait_scale']
+        completed_scale = ddqn_cfg['reward_completed_scale']
+        use_vehicle_bias = ddqn_cfg['reward_use_vehicle_bias']
+        alpha_start = ddqn_cfg['team_reward_alpha_start']
+        alpha_end = ddqn_cfg['team_reward_alpha_end']
+        alpha_warmup = max(1, int(ddqn_cfg['team_reward_alpha_warmup_episodes']))
+        fair_gap_lambda = ddqn_cfg['fairness_gap_lambda']
+        alpha_progress = min(1.0, self.i_episode / alpha_warmup)
+        team_alpha = alpha_start + (alpha_end - alpha_start) * alpha_progress
+
         for idx, infor in enumerate(modify_reward['modified_infor']):
             for data in infor:
                 if data is None:
@@ -238,7 +249,10 @@ class DDQNTrainer:
                         Ko nên để reward cho việc xóa bỏ dependce quá cao.
                         #ví dụ việc hoàn thành 1 task: maximum là 200 thì giá trị của remove depend ko nên vuợt quá nó.
                         '''
-                        add_reward = ((vehicle_id+1)/mission_cfg['n_vehicle'])*((mission_cfg['n_miss_per_vec']-aidx)*(n_remove_depends)*50 - n_waiting*50)+ cnt_completed*mission_cfg['n_mission']
+                        vehicle_weight = ((vehicle_id + 1) / mission_cfg['n_vehicle']) if use_vehicle_bias else 1.0
+                        add_reward = vehicle_weight * (
+                            (mission_cfg['n_miss_per_vec'] - aidx) * n_remove_depends * dep_scale - n_waiting * wait_scale
+                        ) + cnt_completed * mission_cfg['n_mission'] * completed_scale
                         # if add_reward > modify_reward['current_wards'][aidx][vehicle_id][0]:
                         #     add_reward = modify_reward['current_wards'][aidx][vehicle_id][0]
                         # print("------->",vehicle_id, cnt_completed, n_remove_depends, n_waiting, modify_reward['current_wards'][aidx][vehicle_id], add_reward)
@@ -247,6 +261,21 @@ class DDQNTrainer:
                         
                         break
                 change[idx] = True
+
+        # Cooperative fairness shaping at each step: blend with team reward and
+        # softly penalize large deviation from the team mean.
+        for aidx, reward_map in enumerate(modify_reward['current_wards']):
+            keys = sorted(reward_map.keys())
+            if len(keys) == 0:
+                continue
+            values = np.array([float(reward_map[k][0]) for k in keys], dtype=np.float32)
+            mean_value = float(np.mean(values))
+            blended = (1.0 - team_alpha) * values + team_alpha * mean_value
+            if fair_gap_lambda > 0:
+                blended = blended - fair_gap_lambda * np.square(values - mean_value)
+            for idx_key, key in enumerate(keys):
+                reward_map[key][0] = float(blended[idx_key])
+
         #update memory
         for idx, state in enumerate(modify_reward['state']):
             for sidx, vehicle in enumerate(state):

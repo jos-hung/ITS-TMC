@@ -169,7 +169,7 @@ class Mission(Subject):
             dependent_mission = Mission()
             mission.update_status(1, [dependent_mission], 10)
         """
-       
+        
         
         self.__status = value
         n_remove_depends = 0
@@ -446,7 +446,6 @@ class Vehicle(Observer):
             return
         elif self.__intime == False:
             return
-       
         # sorted(self.__ready_mis) #sort các nhiệm vụ theo quãng đường thực hiện
         
         cur_mis = self.__ready_mis.pop(0)
@@ -694,14 +693,14 @@ class NpEncoder(json.JSONEncoder):
         return super(NpEncoder, self).default(obj)
 
 
- 
+
 class TaskGenerator:
     def __init__(self, tau, map,
-                 mindatasize = 100, #kbytes
-                 maxdatasize = 500, #kbytes
-                 mincompsize = 1, #mcycles
-                 maxcompsize = 3, #mcycles
-                 ):
+                mindatasize = 100, #kbytes
+                maxdatasize = 500, #kbytes
+                mincompsize = 1, #mcycles
+                maxcompsize = 3, #mcycles
+                ):
         self.__map = map
         self.__map.draw_segments()
         self.__map.draw_map()

@@ -90,5 +90,17 @@ ddqn_cfg = {
     "batch_size": 512,
     "maxlen_mem": 10000000,
     "modify_reward": True,
-    "combine": 0.0
+    "combine": 0.0,
+    "rotate_selection_order": True,
+    "conflict_penalty_scale": 0.01,
+    "conflict_opportunity_aware": True,
+    "conflict_min_available": 1,
+    "reward_dep_scale": 50.0,
+    "reward_wait_scale": 50.0,
+    "reward_completed_scale": 1.0,
+    "reward_use_vehicle_bias": False,
+    "team_reward_alpha_start": 0.05,
+    "team_reward_alpha_end": 0.15,
+    "team_reward_alpha_warmup_episodes": 30000,
+    "fairness_gap_lambda": 0.0005
 }
