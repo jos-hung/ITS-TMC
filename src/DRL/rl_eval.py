@@ -4,7 +4,7 @@ parent_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(parent_dir)
 sys.path.append(os.path.dirname(parent_dir))
 
-from trainer.ddqn_trainer import DDQNTrainer
+from trainer.rl_runner import RLTrainer
 from trainer.ddqn_agent import DDQNAgent
 import numpy as np
 import torch
@@ -95,16 +95,17 @@ def create_trainer(env, agents, save_dir, update_frequency=100,
             episode.
         score_window_size: Integer window size used in order to gather
             max mean score to evaluate environment solution.
+        thread: Boolean flag to enable threaded training.
+        detach_thread: Boolean flag to detach training threads.
         
     Returns:
-        trainer: A MAPPOTrainer object used to train agents in environment.
+        trainer: A RLTrainer object used to train agents in environment.
         
-        
-    Note: if update_frequency is small, plase don't use detach_thread.
+    Note: if update_frequency is small, please don't use detach_thread.
     """
 
-    # Initialize MAPPOTrainer object with relevant arguments.
-    trainer = DDQNTrainer(
+    # Initialize RLTrainer object with relevant arguments.
+    trainer = RLTrainer(
         env=env,
         agents=agents,
         score_window_size=score_window_size,

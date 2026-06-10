@@ -11,26 +11,31 @@ from configs.systemcfg import avg_reward, ddqn_cfg, mission_cfg, ppo_cfg, a2c_cf
 # plt.style.use('dark_background')
 import copy
 
-class DDQNTrainer:
+class RLTrainer:
     """
-    A class for the implementation and utilization of the training process
-    steps for the Multi-Agent Proximal Policy Optimization algorithm.
+    A unified trainer class for multi-agent reinforcement learning algorithms.
+    
+    This trainer supports various RL algorithms including DDQN, PPO, A2C, and DDPG.
+    It handles the training loop, episode execution, reward modification, and
+    performance tracking for multi-agent environments.
 
     Attributes:
         env: Environment used for Agent evaluation and training.
-        agents: Agent objects being trained in env.
-        score_window_size: Integer window size used in order to gather
-            mean score to evaluate environment solution.
-        max_epsiode_length: An integer for maximum number of timesteps per
-            episode.
+        agents: List of Agent objects being trained in env.
+        score_window_size: Integer window size used to calculate mean scores
+            for environment solution evaluation.
+        max_episode_length: An integer for maximum number of timesteps per episode.
         update_frequency: An integer designating the step frequency of
             updating target network parameters.
         save_dir: Path designating directory to save resulting files.
+        thread: Boolean flag to enable threaded training.
+        detach_thread: Boolean flag to detach training threads.
+        train_start_factor: Multiplier for update_frequency to determine when to start training.
     """
 
     def __init__(self, env, agents, score_window_size, max_episode_length,
                  update_frequency, save_dir, thread = True, detach_thread = True, train_start_factor = 1):
-        """Initializes MAPPOTrainer attributes."""
+        """Initializes RLTrainer attributes."""
         # Initialize relevant variables for training.
         self.env = env
         self.agents = agents
@@ -56,19 +61,23 @@ class DDQNTrainer:
             os.makedirs(self.checkpoints_dir)
         else:
             print(f"Folder '{self.checkpoints_dir}' existed.")
+    
     def step_env(self, actions, states):
         """
         Realizes actions in environment and returns relevant attributes.
 
         Parameters:
             actions: Actions array to be realized in the environment.
+            states: Current state information.
 
         Returns:
-            states: Array with next state information.
+            next_states: Array with next state information.
             rewards: Array with rewards information.
             dones: Array with boolean values with 'true' designating the
                 episode has finished.
-            env_info: BrainInfo object with current environment data.
+            truncateds: Array with truncation information.
+            done_info: Additional completion information.
+            action_dict: Dictionary mapping actions to agents.
         """
 
         # From environment information, extract states and rewards.
@@ -86,17 +95,18 @@ class DDQNTrainer:
     
     def step_env_ma(self, actions):
         """
-        This is step for multi-action DRL
+        Multi-action step for DRL.
 
         Parameters:
             actions: Actions array to be realized in the environment.
 
         Returns:
-            states: Array with next state information.
+            next_states: Array with next state information.
             rewards: Array with rewards information.
             dones: Array with boolean values with 'true' designating the
                 episode has finished.
-            env_info: BrainInfo object with current environment data.
+            truncateds: Array with truncation information.
+            env_info: Environment information object.
         """
 
         # From environment information, extract states and rewards.
@@ -106,11 +116,11 @@ class DDQNTrainer:
         # Evaluate if episode has finished.
         dones = env_info[2]
         truncateds = env_info[3]
-        # action_dict = env_info[5]
 
-        return next_states, rewards, dones, truncateds, env_info#, action_dict
+        return next_states, rewards, dones, truncateds, env_info
     
     def calculate_r_optimized(self, r):
+        """Calculate optimized reward variance metric."""
         sum_squared_diffs = 0
         for i in range(len(r)):
             for j in range(i + 1, len(r)):
@@ -120,7 +130,7 @@ class DDQNTrainer:
     def run_episode(self):
         """
         Runs a single episode in the training process for max_episode_length
-        timesteps.
+        timesteps without reward modification.
 
         Returns:
             scores: List of rewards gained at each timestep.
@@ -160,21 +170,6 @@ class DDQNTrainer:
 
             dones = [dones]*len(states)
             # Add experience to the memories for each agent.
-            #avg reward
-            # adjust_reward = copy.deepcopy(rewards)
-            # keys = list(adjust_reward.keys())
-            # for val in range(len(adjust_reward[keys[0]])):
-            #     r = []
-            #     if t == 0:
-            #         old_eta  = 0
-            #     for key in adjust_reward:
-            #         r.append(adjust_reward[key][val])
-                
-            #     eta = self.calculate_r_optimized(r)
-            #     for key in adjust_reward:
-            #         r_change =  adjust_reward[key][val] + 0.05*(eta - old_eta)
-            #         adjust_reward[key][val] = r_change
-            #     old_eta = eta
             for agent, state, action, log_prob, reward, done, next_state in \
                     zip(self.agents, processed_states, actions, log_probs,
                         rewards, dones, next_states):
@@ -194,16 +189,12 @@ class DDQNTrainer:
                         update_thread = threading.Thread(target=agent.train_model)
                         if self.detach_thread:
                             update_thread.daemon = True
-                            # print("training via a detach thread: {}".format(idx))
                             update_thread.start()
-                            pass
                         else:
                             update_thread.start()
                             threads.append(update_thread)
-                            pass
                 if self.detach_thread==False:
                     for idx, thread in enumerate(threads):
-                        # print("update threading {}.... start join".format(idx))
                         thread.join()
             if self.timestep > 0 and self.timestep%1000==0:
                 for idx, agent in enumerate(self.agents):
@@ -218,6 +209,21 @@ class DDQNTrainer:
         return scores
     
     def do_modify_reward(self,modify_reward):
+        """
+        Modifies rewards based on task completion, dependencies, and fairness.
+        
+        This method applies reward shaping based on:
+        - Task completion and dependency removal
+        - Waiting time penalties
+        - Team-based cooperative rewards
+        - Fairness adjustments to reduce reward variance
+        
+        Parameters:
+            modify_reward: Dictionary containing episode data for reward modification.
+        
+        Returns:
+            0 on successful completion.
+        """
         change = [0]*len(modify_reward['state'])
         cnt_completed = 0
         dep_scale = ddqn_cfg['reward_dep_scale']
@@ -242,27 +248,16 @@ class DDQNTrainer:
                     continue
                 vehicle_id, mission_id, n_remove_depends, n_waiting, profit = data
                 for aidx, act in enumerate(modify_reward['action']) :
-                    #adix chính là thứ tự của action trên mỗi agent
                     if modify_reward['action'][aidx][vehicle_id] == mission_id and modify_reward['current_wards'][aidx][vehicle_id][0] >=0:
-                        '''
-                        Để tránh việc bỏ qua việc thực hiện thành công dựa vào yếu tố của nó: ví dụ như quãng đường ngắn và gần với xe.
-                        Ko nên để reward cho việc xóa bỏ dependce quá cao.
-                        #ví dụ việc hoàn thành 1 task: maximum là 200 thì giá trị của remove depend ko nên vuợt quá nó.
-                        '''
                         vehicle_weight = ((vehicle_id + 1) / mission_cfg['n_vehicle']) if use_vehicle_bias else 1.0
                         add_reward = vehicle_weight * (
                             (mission_cfg['n_miss_per_vec'] - aidx) * n_remove_depends * dep_scale - n_waiting * wait_scale
                         ) + cnt_completed * mission_cfg['n_mission'] * completed_scale
-                        # if add_reward > modify_reward['current_wards'][aidx][vehicle_id][0]:
-                        #     add_reward = modify_reward['current_wards'][aidx][vehicle_id][0]
-                        # print("------->",vehicle_id, cnt_completed, n_remove_depends, n_waiting, modify_reward['current_wards'][aidx][vehicle_id], add_reward)
-                        # print("((mission_cfg['n_miss_per_vec']-aidx)*(n_remove_depends)*50 - n_waiting*50):",((mission_cfg['n_miss_per_vec']-aidx)*(n_remove_depends)*50 - n_waiting*50), add_reward)
                         modify_reward['current_wards'][aidx][vehicle_id][0] = profit + add_reward
-                        
                         break
                 change[idx] = True
 
-        # Cooperative fairness shaping at each step: blend with team reward and
+        # Cooperative fairness shaping: blend with team reward and
         # softly penalize large deviation from the team mean.
         for aidx, reward_map in enumerate(modify_reward['current_wards']):
             keys = sorted(reward_map.keys())
@@ -276,7 +271,7 @@ class DDQNTrainer:
             for idx_key, key in enumerate(keys):
                 reward_map[key][0] = float(blended[idx_key])
 
-        #update memory
+        # Update memory with modified rewards
         for idx, state in enumerate(modify_reward['state']):
             for sidx, vehicle in enumerate(state):
                     if change[idx] == True and modify_reward['action'][idx][sidx]!=-1:
@@ -307,8 +302,10 @@ class DDQNTrainer:
     
     def run_episode_modify_reward(self):
         """
-        Runs a single episode in the training process for max_episode_length
-        timesteps.
+        Runs a single episode with reward modification enabled.
+        
+        This method collects all episode data and applies reward shaping
+        at the end of the episode based on task completion metrics.
 
         Returns:
             scores: List of rewards gained at each timestep.
@@ -364,16 +361,12 @@ class DDQNTrainer:
                         update_thread = threading.Thread(target=agent.train_model)
                         if self.detach_thread:
                             update_thread.daemon = True
-                            # print("training via a detach thread: {}".format(idx))
                             update_thread.start()
-                            pass
                         else:
                             update_thread.start()
                             threads.append(update_thread)
-                            pass
                 if self.detach_thread==False:
                     for idx, thread in enumerate(threads):
-                        # print("update threading {}.... start join".format(idx))
                         thread.join()
             if self.timestep > 0 and self.timestep%1000==0:
                 for idx, agent in enumerate(self.agents):
@@ -390,8 +383,12 @@ class DDQNTrainer:
 
     def run_episode_ma(self):
         """
-        This is multi-action running epochs  
-        ALl agent will select the mission, if they select the same action, the agent which select after will be penalty.
+        Runs a multi-action episode where all agents select missions simultaneously.
+        
+        If agents select the same action, later agents receive a penalty.
+
+        Returns:
+            rewards: List of total rewards for each agent.
         """
 
         # Initialize list to hold reward values at each timestep.
@@ -434,7 +431,6 @@ class DDQNTrainer:
                 if any(torch.equal(processed_state, item) for item in tem_memory_action[cur_idx][0]) \
                     and any(torch.equal(processed_state, item) for item in tem_memory_action[cur_idx][3]) \
                     and action in tem_memory_action[cur_idx][1]:
-                    # print("true------------>")
                     continue
                 tem_memory_action[cur_idx][0].append(processed_state) 
                 tem_memory_action[cur_idx][3].append(processed_state)
@@ -461,17 +457,13 @@ class DDQNTrainer:
                 completed_selection[cur_idx] -= 1    
             cnt += 1
             states = self.env.get_ma_observations(first_queue_list)
-            # if (completed_selection==0).all():
-            #     break
-            # Realize sampled actions in environment and evaluate new state.
+
         while(0 in actions):
             actions.remove(0)
         _, rewards, dones, truncated, _ = self.step_env_ma(actions)
 
         dones = [dones]*len(states)
         # Add experience to the memories for each agent.
-        #ave reward
-        #state, action, reward, next_state
         for idx, key in enumerate(tem_memory_action):
             cur_memory = tem_memory_action[key]
             reward = rewards[idx]
@@ -495,16 +487,12 @@ class DDQNTrainer:
                     update_thread = threading.Thread(target=agent.train_model)
                     if self.detach_thread:
                         update_thread.daemon = True
-                        # print("training via a detach thread: {}".format(idx))
                         update_thread.start()
-                        pass
                     else:
                         update_thread.start()
                         threads.append(update_thread)
-                        pass
             if self.detach_thread==False:
                 for idx, thread in enumerate(threads):
-                    # print("update threading {}.... start join".format(idx))
                     thread.join()
         if self.timestep > 0 and self.timestep%5000==0:
             for idx, agent in enumerate(self.agents):
@@ -521,6 +509,9 @@ class DDQNTrainer:
         """
         Initiates run of an episode and logs the resulting total rewards and
         episode lengths.
+        
+        Automatically determines whether to use reward modification based on
+        the agent type and its configuration.
         """
 
         # Run a single episode in environment.
@@ -549,14 +540,13 @@ class DDQNTrainer:
 
         # Store total rewards and episode lengths.
         self.score_history.append(score_by_agent)
-        # if self.max_score  < max(score_by_agent):
         self.max_score = max(score_by_agent)
         self.episode_length_history.append(len(scores))
         
     def step_ma(self):
         """
-        Initiates run of an episode and logs the resulting total rewards and
-        episode lengths.
+        Initiates run of a multi-action episode and logs the resulting total 
+        rewards and episode lengths.
         """
 
         # Run a single episode in environment.
@@ -572,7 +562,7 @@ class DDQNTrainer:
 
     def save(self):
         """
-        Saves actor_critic for both agents once successful score is achieved.
+        Saves agent models to checkpoint files.
         """           
         for agent_ix in range(len(self.agents)):
             agent = self.agents[agent_ix]
@@ -607,10 +597,9 @@ class DDQNTrainer:
     def plot(self):
         """
         Plots moving averages of maximum reward and rewards for each agent.
-        Avoids using colors that blend with the background (e.g., white).
+        Saves the plot and reward data to the save directory.
         """
         
-
         # Initialize DataFrame
         columns = [f'Agent {i}' for i in range(len(self.agents))]
         df = pd.DataFrame(self.score_history, columns=columns)
@@ -618,7 +607,7 @@ class DDQNTrainer:
 
         # Setup figure and axis
         fig, ax = plt.subplots(figsize=(12, 9))
-        ax.set_title('Learning Curve: Multi-Agent DDQN', fontsize=28)
+        ax.set_title('Learning Curve: Multi-Agent RL', fontsize=28)
         ax.set_xlabel('Episode', fontsize=21)
         ax.set_ylabel('Score', fontsize=21)
 

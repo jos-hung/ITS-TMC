@@ -410,16 +410,23 @@ class ITSEnv(gym.Env):
                 action_out[idx] = -1
                 continue
             v_action = action_dict[idx][1]
-            v_action =  v_action.detach().numpy()
-            # action = int(np.argmax(v_action))
+            if hasattr(v_action, "detach"):
+                v_action = v_action.detach().cpu().numpy()
+            else:
+                v_action = np.asarray(v_action)
+
+            # Accept scalar index, 1D/2D logits, or one-hot/probability vectors.
+            if v_action.ndim == 0:
+                selected_action = int(v_action.item())
+            else:
+                selected_action = int(np.argmax(v_action))
+
             if agents!=None:
                 agent = agents[idx]
                 if type(agent).__name__ == "DDQNAgent" and agent.epsilon > self.generator.random():
                     action = self.generator.integers(0, agent.action_size)
-                elif type(agent).__name__ == "PPOAgent":
-                    action = v_action[0]
                 else:
-                    action = int(np.argmax(v_action))
+                    action = selected_action
             else:
                 print("1 loi da xay ra")
                 exit(1)

@@ -438,6 +438,10 @@ class Vehicle(Observer):
     def check_time(self):
         return self.__intime
     
+    def handle_offloading_with_vehicles_speed(self, offload_task, current_line_of_road, aver_speed, cur_point, trajectory):
+        pass
+    
+    
     def process_mission(self, missions = None):
         #process priority is the shortest mission first
         #check event two mission in the same parth or not

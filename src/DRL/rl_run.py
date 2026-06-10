@@ -4,14 +4,24 @@ parent_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(parent_dir)
 sys.path.append(os.path.dirname(parent_dir))
 
-from trainer.ddqn_trainer import DDQNTrainer
+from trainer.rl_runner import RLTrainer
 from trainer.ddqn_agent import DDQNAgent
+from trainer.advanced_agents import PPOAgent, A2CAgent, DDPGAgent
 import numpy as np
 import torch
 import sys
 import os
 from rl_env import *
-from configs.systemcfg import log_configs, mission_cfg, map_cfg, ppo_cfg, DEVICE, ddqn_cfg
+from configs.systemcfg import (
+    log_configs,
+    mission_cfg,
+    map_cfg,
+    ppo_cfg,
+    DEVICE,
+    ddqn_cfg,
+    a2c_cfg,
+    ddpg_cfg,
+)
 from utils import Load, write_config_not_fromfile
 import torch.optim as optim
 import torch.nn as nn
@@ -36,7 +46,7 @@ def create_agent(state_size, action_size, actor_fc1_units=64,
                  num_updates=100, max_eps_length=500, eps_clip=0.3,
                  critic_loss=0.5, entropy_bonus=0.01, batch_size=256, 
                  agent_idx=0, load_from_file=False, ckpt_idx = 0, 
-                 ppo=False):
+                 ppo=False, algorithm="ddqn"):
 
     """
     This function creates an agent with specified parameters for training.
@@ -74,52 +84,17 @@ def create_agent(state_size, action_size, actor_fc1_units=64,
         checkpoint_path = "./checkpoints/agent_" + str(agent_idx) + '.pth'
     else:
         checkpoint_path = "./checkpoints/agent_" + str(agent_idx) +'_'+str(ckpt_idx)+ '.pth'
-    if ppo:
-        # Create Actor/Critic networks based on designated parameters.
-        actor_net = ActorNet(actor_size, action_size, actor_fc1_units,
-                            actor_fc2_units).to(device)
-        critic_net = CriticNet(critic_size, critic_fc1_units, critic_fc2_units)\
-            .to(device)
-
-        # Create copy of Actor/Critic networks for action prediction.
-        actor_net_old = ActorNet(actor_size, action_size, actor_fc1_units,
-                                actor_fc2_units).to(device)
-        critic_net_old = CriticNet(critic_size, critic_fc1_units, critic_fc2_units)\
-            .to(device)
-        actor_net_old.load_state_dict(actor_net.state_dict())
-        critic_net_old.load_state_dict(critic_net.state_dict())
-
-        # Create PolicyNormal objects containing both sets of Actor/Critic nets.
-        actor_critic = PolicyNormal(actor_net, critic_net)
-        actor_critic_old = PolicyNormal(actor_net_old, critic_net_old)
-
-        # Initialize optimizers for Actor and Critic networks.
-        actor_optimizer = torch.optim.Adam(
-            actor_net.parameters(),
-            lr=actor_lr
-        )
-        critic_optimizer = torch.optim.Adam(
-            critic_net.parameters(),
-            lr=critic_lr
-        )
-
-        # # Create and return PPOAgent with relevant parameters.
-        agent = PPOAgent(
-            device=device,
-            actor_critic=actor_critic,
-            actor_critic_old=actor_critic_old,
-            gamma=gamma,
-            num_updates=num_updates,
-            eps_clip=eps_clip,
-            critic_loss=critic_loss,
-            entropy_bonus=entropy_bonus,
-            batch_size=batch_size,
-            actor_optimizer=actor_optimizer,
-            critic_optimizer=critic_optimizer,
-        )
-
-    else:
+    algorithm = algorithm.lower()
+    if algorithm == "ddqn":
         agent = DDQNAgent(state_size=state_size, action_size=action_size, checkpoint_path=checkpoint_path, load_model=load_from_file)
+    elif algorithm == "ppo":
+        agent = PPOAgent(state_size=state_size, action_size=action_size, checkpoint_path=checkpoint_path, load_model=load_from_file)
+    elif algorithm == "a2c":
+        agent = A2CAgent(state_size=state_size, action_size=action_size, checkpoint_path=checkpoint_path, load_model=load_from_file)
+    elif algorithm == "ddpg":
+        agent = DDPGAgent(state_size=state_size, action_size=action_size, checkpoint_path=checkpoint_path, load_model=load_from_file)
+    else:
+        raise ValueError(f"Unsupported algorithm: {algorithm}")
 
     return agent
 
@@ -128,7 +103,7 @@ def create_agent(state_size, action_size, actor_fc1_units=64,
 
 
 def create_trainer(env, agents, save_dir, update_frequency=500,
-                   max_eps_length=100, score_window_size=100, thread = True, detach_thread = True, type_ = "MAPPOTrainer"):   #change the type of agents
+                   max_eps_length=100, score_window_size=100, thread = True, detach_thread = True):
     
     """
     Initializes trainer to train agents in specified environment.
@@ -143,22 +118,19 @@ def create_trainer(env, agents, save_dir, update_frequency=500,
             episode.
         score_window_size: Integer window size used in order to gather
             max mean score to evaluate environment solution.
+        thread: Boolean flag to enable threaded training.
+        detach_thread: Boolean flag to detach training threads.
         
     Returns:
-        trainer: A MAPPOTrainer object used to train agents in environment.
+        trainer: A RLTrainer object used to train agents in environment.
         
-        
-    Note: if update_frequency is small, plase don't use detach_thread.
+    Note: if update_frequency is small, please don't use detach_thread.
     """
 
-    # Initialize MAPPOTrainer object with relevant arguments.
+    # Initialize RLTrainer object with relevant arguments.
     if not os.path.exists(save_dir):
         os.mkdir(save_dir)
-    if type_=="DDQNTrainer":
-        method = DDQNTrainer
-    else:
-        method = MAPPOTrainer
-    trainer = method(
+    trainer = RLTrainer(
         env=env,
         agents=agents,
         score_window_size=score_window_size,
@@ -278,22 +250,88 @@ def ddqn(**kwargs):
     state_size = np.prod(env.observation_space.shape)
     action_size = env.action_space.shape[0] 
     # Initialize agents for training.
-    agents = [create_agent(state_size, action_size, agent_idx=i, load_from_file=False, ckpt_idx=0) for i in range(num_agents)]
+    agents = [
+        create_agent(
+            state_size,
+            action_size,
+            agent_idx=i,
+            load_from_file=False,
+            ckpt_idx=0,
+            algorithm="ddqn",
+        )
+        for i in range(num_agents)
+    ]
     save_dir = os.path.join(os.getcwd(), 'saved_files_global_combine_decay_{}_lr_{}_batch_size_{}_modify_reward_{}_combine_{}_more'.format(ddqn_cfg['epsilon_decay'],ddqn_cfg['learning_rate'],ddqn_cfg['batch_size'],ddqn_cfg['modify_reward'],ddqn_cfg['combine']))
     trainer = create_trainer(env, agents, save_dir, 
                              thread = config['thread'], 
                              detach_thread=config['detach_thread'],
                              score_window_size =  config['score_window_size'],
                              max_eps_length=config['n_miss_per_vec']*config['n_vehicles'],
-                             type_='DDQNTrainer',
                              update_frequency=ddqn_cfg['batch_size']/4
                              )
 
     train_agents(env, trainer, score_window_size = config['score_window_size'])
 
 
+def _train_by_algorithm(algorithm_name, algo_cfg, **kwargs):
+    verbose = kwargs.get('verbose', False)
+    load = Load()
+    _, map_information = load.get_infor()
+    task_generator = TaskGenerator(1, map_information)
+    config = write_config_not_fromfile(task_generator)
+    register_env("its_env", lambda cfg: ITSEnv(cfg, verbose=verbose, map__=map_information, generator=task_generator))
+    env = ITSEnv(config, verbose=verbose, map__=map_information, generator=task_generator)
+    num_agents = config['n_vehicles']
+    state_size = np.prod(env.observation_space.shape)
+    action_size = env.action_space.shape[0]
+
+    agents = [
+        create_agent(
+            state_size,
+            action_size,
+            agent_idx=i,
+            load_from_file=False,
+            ckpt_idx=0,
+            algorithm=algorithm_name,
+        )
+        for i in range(num_agents)
+    ]
+
+    save_dir = os.path.join(
+        os.getcwd(),
+        f"saved_files_{algorithm_name}_lr_{algo_cfg.get('learning_rate', algo_cfg.get('actor_lr', 1e-4))}_batch_{algo_cfg['batch_size']}"
+    )
+    trainer = create_trainer(
+        env,
+        agents,
+        save_dir,
+        thread=config['thread'],
+        detach_thread=config['detach_thread'],
+        score_window_size=config['score_window_size'],
+        max_eps_length=config['n_miss_per_vec'] * config['n_vehicles'],
+        update_frequency=max(1, int(algo_cfg['batch_size'] / 4)),
+    )
+
+    train_agents(env, trainer, score_window_size=config['score_window_size'])
+
+
+def ppo(**kwargs):
+    _train_by_algorithm("ppo", ppo_cfg, **kwargs)
+
+
+def A2C(**kwargs):
+    _train_by_algorithm("a2c", a2c_cfg, **kwargs)
+
+
+def a2c(**kwargs):
+    A2C(**kwargs)
+
+
+def ddpg(**kwargs):
+    _train_by_algorithm("ddpg", ddpg_cfg, **kwargs)
+
+
 
 if __name__ == '__main__':
-    # ddqn()
-    mppo()
+    ddqn()
 

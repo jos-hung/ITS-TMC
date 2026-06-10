@@ -36,7 +36,40 @@ ppo_cfg = {
     'score_window_size': 100,
     'thread': apply_thread,
     'detach_thread': apply_detach,
-    'type_': 'MAPPOTrainer'
+    'type_': 'MAPPOTrainer',
+    'discount_factor': 0.99,
+    'learning_rate': 3e-4,
+    'batch_size': 256,
+    'maxlen_mem': 200000,
+    'eps_clip': 0.2,
+    'entropy_coef': 0.01,
+    'value_coef': 0.5,
+    'k_epochs': 4,
+    'combine': 0.0,
+    'modify_reward': True
+}
+
+a2c_cfg = {
+    'discount_factor': 0.99,
+    'learning_rate': 3e-4,
+    'batch_size': 256,
+    'maxlen_mem': 200000,
+    'entropy_coef': 0.01,
+    'value_coef': 0.5,
+    'combine': 0.0,
+    'modify_reward': True
+}
+
+ddpg_cfg = {
+    'discount_factor': 0.99,
+    'actor_lr': 1e-4,
+    'critic_lr': 1e-3,
+    'tau': 0.005,
+    'noise_std': 0.1,
+    'batch_size': 256,
+    'maxlen_mem': 200000,
+    'combine': 0.0,
+    'modify_reward': True
 }
 
     
