@@ -156,13 +156,28 @@ class RLTrainer:
                 agent = self.agents[idx]
                 observationip = np.reshape(states[state], (1, -1))
                 processed_state = torch.from_numpy(observationip).float()
-                action, log_prob = agent.get_actions(processed_state, idx)
+                action, _ = agent.get_actions(processed_state, idx)
                 if any(torch.equal(processed_state, item) for item in processed_states) \
                     and int(np.argmax(action[1])) in actionssss:
                     continue
-                actionssss.append(int(np.argmax(action[1])))
+                
+                agent_type = type(agent).__name__
+                LOGIT_CLIP = 10.0
+                if agent_type in ["PPOAgent", "A2CAgent"]:
+                    logits = torch.clamp(action[1], -LOGIT_CLIP, LOGIT_CLIP)
+                    dist = torch.distributions.Categorical(logits=logits)
+                    action_sample = dist.sample()
+                    action_idx = int(action_sample.item())
+                elif agent_type == "DDPGAgent":
+                    noise = torch.normal(0, 0.1, size=action[1].squeeze(0).shape)
+                    action_scores = action[1].squeeze(0) + noise
+                    action_idx = int(torch.argmax(action_scores).item())
+                else:
+                    action_idx = int(np.argmax(action[1]))
+                
+                actionssss.append(action_idx)
                 processed_states.append(processed_state)
-                log_probs.append(log_prob)
+                log_probs.append(None)
                 actions.append(action)
                 actions_save.append(action[1])
             # Realize sampled actions in environment and evaluate new state.
@@ -226,14 +241,25 @@ class RLTrainer:
         """
         change = [0]*len(modify_reward['state'])
         cnt_completed = 0
-        dep_scale = ddqn_cfg['reward_dep_scale']
-        wait_scale = ddqn_cfg['reward_wait_scale']
-        completed_scale = ddqn_cfg['reward_completed_scale']
-        use_vehicle_bias = ddqn_cfg['reward_use_vehicle_bias']
-        alpha_start = ddqn_cfg['team_reward_alpha_start']
-        alpha_end = ddqn_cfg['team_reward_alpha_end']
-        alpha_warmup = max(1, int(ddqn_cfg['team_reward_alpha_warmup_episodes']))
-        fair_gap_lambda = ddqn_cfg['fairness_gap_lambda']
+        
+        agent_type = type(self.agents[0]).__name__
+        if agent_type == "PPOAgent":
+            cfg = ppo_cfg
+        elif agent_type == "A2CAgent":
+            cfg = a2c_cfg
+        elif agent_type == "DDPGAgent":
+            cfg = ddpg_cfg
+        else:
+            cfg = ddqn_cfg
+        
+        dep_scale = cfg['reward_dep_scale']
+        wait_scale = cfg['reward_wait_scale']
+        completed_scale = cfg['reward_completed_scale']
+        use_vehicle_bias = cfg['reward_use_vehicle_bias']
+        alpha_start = cfg['team_reward_alpha_start']
+        alpha_end = cfg['team_reward_alpha_end']
+        alpha_warmup = max(1, int(cfg['team_reward_alpha_warmup_episodes']))
+        fair_gap_lambda = cfg['fairness_gap_lambda']
         alpha_progress = min(1.0, self.i_episode / alpha_warmup)
         team_alpha = alpha_start + (alpha_end - alpha_start) * alpha_progress
 
@@ -274,26 +300,27 @@ class RLTrainer:
         # Update memory with modified rewards
         for idx, state in enumerate(modify_reward['state']):
             for sidx, vehicle in enumerate(state):
-                    if change[idx] == True and modify_reward['action'][idx][sidx]!=-1:
+                    action_idx = modify_reward['action_indices'][idx][sidx] if sidx < len(modify_reward['action_indices'][idx]) else -1
+                    if change[idx] == True and action_idx != -1:
                         
                         self.agents[sidx].add_global_memory(state[vehicle], 
-                                            modify_reward['action'][idx][sidx],
+                                            action_idx,
                                             modify_reward['current_wards'][idx][sidx], 
                                             modify_reward['next_state'][idx][vehicle],
                                             modify_reward['dones'][idx][sidx])
                         self.agents[sidx].add_memory(state[vehicle], 
-                                            modify_reward['action'][idx][sidx],
+                                            action_idx,
                                             modify_reward['current_wards'][idx][sidx], 
                                             modify_reward['next_state'][idx][vehicle],
                                             modify_reward['dones'][idx][sidx])
-                    elif modify_reward['action'][idx][sidx]!=-1:
+                    elif action_idx != -1:
                         self.agents[sidx].add_memory(state[vehicle], 
-                                                modify_reward['action'][idx][sidx],
+                                                action_idx,
                                                 [-100], 
                                                 modify_reward['next_state'][idx][vehicle],
                                                 modify_reward['dones'][idx][sidx])
                         self.agents[sidx].add_global_memory(state[vehicle], 
-                                                modify_reward['action'][idx][sidx],
+                                                action_idx,
                                                 [-100], 
                                                 modify_reward['next_state'][idx][vehicle],
                                                 modify_reward['dones'][idx][sidx])
@@ -321,32 +348,57 @@ class RLTrainer:
 
         # Act and evaluate results and networks for each timestep.
         actionssss = []
-        modify_reward = {"step": [], 'state': [], 'action':[], 'current_wards':[], 'next_state':[], 'modified_infor':[], 'dones': []}
+        modify_reward = {"step": [], 'state': [], 'action':[], 'action_indices': [], 'current_wards':[], 'next_state':[], 'modified_infor':[], 'dones': []}
         for t in range(self.max_episode_length):
-            print(t, self.max_episode_length)
             self.timestep += 1
             # Sample actions for each agent while keeping track of states,
             # actions and log probabilities.
             processed_states, actions, actions_save, log_probs = [], [], [], []
+            action_indices_step = []
             for idx, state in enumerate(states):
                 agent = self.agents[idx]
                 observationip = np.reshape(states[state], (1, -1))
                 processed_state = torch.from_numpy(observationip).float()
-                action, log_prob = agent.get_actions(processed_state, idx)
+                action, _ = agent.get_actions(processed_state, idx)
+                
+                agent_type = type(agent).__name__
+                LOGIT_CLIP = 10.0
+                if agent_type in ["PPOAgent", "A2CAgent"]:
+                    logits = action[1]
+                    print("logits before clip: ", logits) #no clip
+                    dist = torch.distributions.Categorical(logits=logits)
+                    action_sample = dist.sample()
+                    action_idx = int(action_sample.item())
+                    log_prob = dist.log_prob(action_sample)
+                    log_probs.append(log_prob)
+        
+                elif agent_type == "DDPGAgent":
+                    noise = torch.normal(0, 0.1, size=action[1].squeeze(0).shape)
+                    action_scores = action[1].squeeze(0) + noise
+                    action_idx = int(torch.argmax(action_scores).item())
+                    log_probs.append(None)
+                elif agent_type == "DDQNAgent":
+                    action_idx = int(np.argmax(action[1]))
+                    log_probs.append(None)
+                else:
+                    raise ValueError(f"Unsupported agent type: {agent_type}")
+
                 if any(torch.equal(processed_state, item) for item in processed_states) \
-                    and int(np.argmax(action[1])) in actionssss:
+                    and action_idx in actionssss:
                     continue
-                actionssss.append(int(np.argmax(action[1])))
+
+                actionssss.append(action_idx)
                 processed_states.append(processed_state)
-                log_probs.append(log_prob)
                 actions.append(action)
                 actions_save.append(action[1])
+                action_indices_step.append(action_idx)
             # Realize sampled actions in environment and evaluate new state.
-            next_states, rewards, dones, truncated, done_process_infor, actions = self.step_env(actions, states)
+            next_states, rewards, dones, truncated, done_process_infor, action_dict = self.step_env(actions, states)
             dones = [dones]*len(states)
             modify_reward['step'].append(t)
             modify_reward['state'].append(states)
-            modify_reward['action'].append(actions)
+            modify_reward['action'].append(action_dict)
+            modify_reward['action_indices'].append(action_indices_step)
             modify_reward['current_wards'].append(rewards)
             modify_reward['next_state'].append(next_states)
             modify_reward['modified_infor'].append(done_process_infor)
@@ -370,7 +422,8 @@ class RLTrainer:
                         thread.join()
             if self.timestep > 0 and self.timestep%1000==0:
                 for idx, agent in enumerate(self.agents):
-                    agent.update_target_model()
+                    if hasattr(agent, 'update_target_model'):
+                        agent.update_target_model()
             for idx, reward in rewards.items():
                 scores[idx]+=reward
         

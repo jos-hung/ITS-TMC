@@ -39,14 +39,22 @@ ppo_cfg = {
     'type_': 'MAPPOTrainer',
     'discount_factor': 0.99,
     'learning_rate': 3e-4,
-    'batch_size': 256,
+    'batch_size': 128,
     'maxlen_mem': 200000,
     'eps_clip': 0.2,
     'entropy_coef': 0.01,
     'value_coef': 0.5,
     'k_epochs': 4,
     'combine': 0.0,
-    'modify_reward': True
+    'modify_reward': True,
+    'reward_dep_scale': 50.0,
+    'reward_wait_scale': 50.0,
+    'reward_completed_scale': 1.0,
+    'reward_use_vehicle_bias': False,
+    'team_reward_alpha_start': 0.05,
+    'team_reward_alpha_end': 0.15,
+    'team_reward_alpha_warmup_episodes': 30000,
+    'fairness_gap_lambda': 0.0005
 }
 
 a2c_cfg = {
@@ -57,7 +65,15 @@ a2c_cfg = {
     'entropy_coef': 0.01,
     'value_coef': 0.5,
     'combine': 0.0,
-    'modify_reward': True
+    'modify_reward': True,
+    'reward_dep_scale': 50.0,
+    'reward_wait_scale': 50.0,
+    'reward_completed_scale': 1.0,
+    'reward_use_vehicle_bias': False,
+    'team_reward_alpha_start': 0.05,
+    'team_reward_alpha_end': 0.15,
+    'team_reward_alpha_warmup_episodes': 30000,
+    'fairness_gap_lambda': 0.0005
 }
 
 ddpg_cfg = {
@@ -69,7 +85,15 @@ ddpg_cfg = {
     'batch_size': 256,
     'maxlen_mem': 200000,
     'combine': 0.0,
-    'modify_reward': True
+    'modify_reward': True,
+    'reward_dep_scale': 50.0,
+    'reward_wait_scale': 50.0,
+    'reward_completed_scale': 1.0,
+    'reward_use_vehicle_bias': False,
+    'team_reward_alpha_start': 0.05,
+    'team_reward_alpha_end': 0.15,
+    'team_reward_alpha_warmup_episodes': 30000,
+    'fairness_gap_lambda': 0.0005
 }
 
     
