@@ -506,8 +506,13 @@ class Vehicle(Observer):
             for idx, val in enumerate(sol):
                 #val = order and vehicle
                 if val[1] == self.__vid and val not in completed_set:
-                    i = missions.index(int(idx))
-                    mis = missions[i]
+                    try:
+                        i = missions.index(int(idx))
+                        mis = missions[i]
+                    except Exception as e:
+                        print(f"Error finding mission with index {idx}: {e}")
+                        print(f"list of missions: {[m.get_mid() for m in missions]}")
+                        exit(1)
                     if len(mis.get_depends()) == 0:
                         mis.update_status(1)                     
                     if self.__non_priority_orders and mis.get_status() == 1:

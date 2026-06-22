@@ -46,11 +46,11 @@ def _parse_args():
     p = argparse.ArgumentParser(description="SCA Upper Bound for Problem (P1)")
     p.add_argument("--ub-only",   action="store_true",
                 help="Only compute the LP upper bound; skip full simulation of rounded solution.")
-    p.add_argument("--max-iter",  type=int,   default=30,
+    p.add_argument("--max-iter",  type=int,   default=100,
                 help="Maximum SCA iterations (default: 30).")
     p.add_argument("--tol",       type=float, default=1e-3,
                 help="Convergence tolerance on UB change (default: 1e-3).")
-    p.add_argument("--n-trials",  type=int,   default=5,
+    p.add_argument("--n-trials",  type=int,   default=10,
                 help="Number of independent trials to average over (default: 5).")
     p.add_argument("--drl-csv",   type=str,   default=None,
                 help="Path to DRL reward CSV for comparison plot.")
@@ -178,11 +178,11 @@ def _plot_comparison(args, ub_mean, ub_std, sim_results):
     """Generate comparison figure: SCA UB + (optionally) DRL reward curve."""
     try:
         import matplotlib.pyplot as plt
-        try:
-            import scienceplots
-            plt.style.use(["science", "ieee"])
-        except ImportError:
-            pass  # scienceplots optional
+        # try:
+        #     import scienceplots
+        #     plt.style.use(["science", "ieee"])
+        # except ImportError:
+        #     pass  # scienceplots optional
 
         fig, ax = plt.subplots(figsize=(7, 5))
         iters = np.arange(len(ub_mean))
@@ -198,7 +198,7 @@ def _plot_comparison(args, ub_mean, ub_std, sim_results):
         if sim_results:
             mean_profit = np.mean([r['total_profit'] for r in sim_results])
             ax.axhline(mean_profit, color='green', linestyle='--',
-                       label=f'SCA Rounded (sim): {mean_profit:.2f}')
+                    label=f'SCA Rounded (sim): {mean_profit:.2f}')
 
         # DRL learning curve (optional)
         if args.drl_csv and os.path.exists(args.drl_csv):

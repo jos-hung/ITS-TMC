@@ -11,6 +11,7 @@ from src import *
 from src.DRL.rl_eval import eval_ddqn
 from src.DRL.rl_run import ddqn
 from src.meta_heuristic.script_many_metaheuristics import many_metaheuristics
+from src.meta_heuristic.script_sca_upper_bound import sca_upper_bound
 from src.meta_heuristic.script_statistic import get_statistic_results
 from src.meta_heuristic.script_visualize import (
     csv_compared_greedy_random_meta,

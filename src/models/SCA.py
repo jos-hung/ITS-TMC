@@ -97,8 +97,8 @@ def _mission_veff(road_len: float, d_task: float,
 
 
 def _feasible(road_len: float, d_task: float,
-              v_nom: float, rho_down: float, rho_up: float,
-              lambda_avg: float, tau_sec: float) -> bool:
+            v_nom: float, rho_down: float, rho_up: float,
+            lambda_avg: float, tau_sec: float) -> bool:
     """
     Eq. (26): v^eff * tau >= road_len  (mission completion feasibility).
     """
@@ -202,14 +202,14 @@ class SCAUpperBound:
     Parameters
     ----------
     missions       : list[Mission]  – Mission objects with get_long(), get_profit(),
-                                      get_depends(), get_mid()
+                                    get_depends(), get_mid()
     n_vehicles     : int            – number of vehicles V
     n_miss_per_veh : int            – vehicle mission capacity M
     tau_sec        : float          – time budget in seconds (default: task_cfg['tau']*60)
     avg_rate_bps   : float          – average uplink data rate (bps)
-                                      default: heuristic ~33 Mbps
+                                    default: heuristic ~33 Mbps
     avg_cpu        : float          – average MEC CPU frequency
-                                      (same unit as network_cfg['CPU_freq'])
+                                    (same unit as network_cfg['CPU_freq'])
     max_iter       : int            – max SCA iterations
     tol            : float          – convergence threshold on |UB_t - UB_{t-1}|
     seed           : int            – RNG seed
@@ -277,7 +277,7 @@ class SCAUpperBound:
     def _build_profit_matrix(self, d_kv: np.ndarray) -> np.ndarray:
         """
         W[k,v] = profit_k  if mission k is feasible for vehicle v (C5 check),
-               = 0          otherwise.
+            = 0          otherwise.
 
         Feasibility uses Eq. (26): v^eff(d^(t)) * tau >= road_len.
         Since d^(t) <= true delays, v^eff is over-estimated and the feasible
@@ -292,13 +292,13 @@ class SCAUpperBound:
                 continue
             for v in range(self.V):
                 if _feasible(road_len, d_kv[k, v],
-                             self.v_nom, self.rho_down, self.rho_up,
-                             self.lambda_avg, self.tau_sec):
+                            self.v_nom, self.rho_down, self.rho_up,
+                            self.lambda_avg, self.tau_sec):
                     W[k, v] = profit
         return W
 
     def _update_delays(self, x_lp: np.ndarray,
-                       d_kv: np.ndarray) -> np.ndarray:
+                    d_kv: np.ndarray) -> np.ndarray:
         """
         SCA delay tightening step.
 
@@ -340,9 +340,9 @@ class SCAUpperBound:
 
         if verbose:
             print(f"SCA Upper Bound  |  K={self.K} missions, V={self.V} vehicles, "
-                  f"M={self.M}, tau={self.tau_sec}s")
+                f"M={self.M}, tau={self.tau_sec}s")
             print(f"  avg_d_task = {self.avg_d_task:.6f} s, "
-                  f"lambda_avg = {self.lambda_avg:.1f} tasks/s")
+                f"lambda_avg = {self.lambda_avg:.1f} tasks/s")
 
         W_final = np.zeros((self.K, self.V))
         for t in range(self.max_iter):
@@ -353,14 +353,14 @@ class SCAUpperBound:
             if verbose:
                 n_feas = int((W > 0).any(axis=1).sum())
                 print(f"  iter {t:3d} | UB = {ub:10.4f} | "
-                      f"feasible missions = {n_feas}/{self.K}")
+                    f"feasible missions = {n_feas}/{self.K}")
 
             if t > 0 and abs(ub_history[-1] - ub_history[-2]) < self.tol:
                 converged = True
                 W_final = W
                 if verbose:
                     print(f"  Converged at iteration {t}  "
-                          f"(delta = {abs(ub_history[-1]-ub_history[-2]):.2e})")
+                        f"(delta = {abs(ub_history[-1]-ub_history[-2]):.2e})")
                 break
 
             d_kv  = self._update_delays(x_lp, d_kv)
@@ -458,6 +458,7 @@ class SCAUpperBound:
                         graph=graph, verbose=verbose)
             m.set_depends(item['depends'])
             m.set_observers(vehicles)
+            m.set_mid(item['i'])
             missions.append(m)
         if missions:
             missions[0].reset()
