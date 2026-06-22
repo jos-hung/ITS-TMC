@@ -125,7 +125,7 @@ map_cfg = {
     'radius': 2500,
     'n_lines': 15,
     'busy': 1,
-    'fromfile': 0
+    'fromfile': 1
 }
 network_cfg = {
     "n_MEC":20,
@@ -137,6 +137,14 @@ network_cfg = {
     "best_rate_radius": 100, #m
     "seed":42 
 }
+vehicle_cfg = {
+    # Per-robot mobility parameters (Paper Section II, Eqs. 13-20)
+    'v_nominal': 10.0,   # nominal traveling speed v^0_v (m/s)
+    'v_min': 0.0,        # minimum safe speed v^min_v (m/s)
+    'rho_down': 2.0,     # safe deceleration rate rho^down_v (m/s^2)
+    'rho_up': 2.0,       # acceleration rate rho^up_v (m/s^2)
+}
+
 eval = False
 ddqn_cfg = {
     "discount_factor":0.95,

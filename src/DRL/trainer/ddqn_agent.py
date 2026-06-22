@@ -22,6 +22,7 @@ else:
 
     
 from configs.systemcfg import ddqn_cfg, eval
+
 class DDQNAgent(nn.Module):
     global_memory = deque(maxlen=ddqn_cfg['maxlen_mem'])
     
@@ -47,7 +48,6 @@ class DDQNAgent(nn.Module):
         self.target_model = self.build_model().to(device)
         self.criterion = nn.MSELoss()
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.learning_rate)
-        # self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.1, patience=5, verbose=True)
 
         self.model_file = checkpoint_path 
         self.generator = np.random.default_rng(GLOBAL_SEED)
@@ -83,7 +83,8 @@ class DDQNAgent(nn.Module):
         return x
 
     def save_model(self, name):
-        torch.save(self.model.state_dict(), name)
+        # torch.save(self.model.state_dict(), name)
+        pass # tam thoi khong luu model
 
     def update_target_model(self):
         self.target_model.load_state_dict(self.model.state_dict())

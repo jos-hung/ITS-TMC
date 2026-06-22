@@ -9,11 +9,209 @@ import matplotlib.pyplot as plt
 from physic_definition.map.graph import Graph
 import json
 import abc
-from configs.systemcfg import mission_cfg, task_cfg, map_cfg
+from configs.systemcfg import mission_cfg, task_cfg, map_cfg, vehicle_cfg
 from physic_definition.map.map import *
 from physic_definition.network.rate import *
 import time
 import threading
+
+
+# -----------------------------------------------------------------------
+# Mobility Physics Functions (Paper Section II.C, Eqs. 13–20)
+# These model the parallel execution of robot movement and computation.
+# -----------------------------------------------------------------------
+
+def mobility_v_safe(u, v_kv, rho_down):
+    """
+    Safe speed of robot v during waiting interval of task j at elapsed time u (Eq. 13).
+
+    v^safe_{k,v,j}(u) = max(0, v_{k,v} - rho^down_v * u)
+
+    Args:
+        u       : elapsed waiting time since task j started (s)
+        v_kv    : nominal traveling speed during mission k (m/s)
+        rho_down: safe deceleration rate rho^down_v (m/s^2)
+    Returns:
+        current safe speed (m/s); 0 when robot has fully stopped
+    """
+    return max(0.0, v_kv - rho_down * u)
+
+
+def mobility_d_up(v_kv, d_kj, rho_down, rho_up):
+    """
+    Required speed recovery time after receiving result of control task j (Eq. 14).
+
+    d^up_{k,v,j} = (v_{k,v} - v^safe_{k,v,j}(d_{k,j})) / rho^up_v
+
+    Args:
+        v_kv    : nominal traveling speed (m/s)
+        d_kj    : effective waiting time d_{k,j} = min(exe_delay, d^max_{k,j}) (Eq. 12)
+        rho_down: deceleration rate (m/s^2)
+        rho_up  : acceleration rate rho^up_v (m/s^2)
+    Returns:
+        recovery time (s)
+    """
+    v_safe = mobility_v_safe(d_kj, v_kv, rho_down)
+    return (v_kv - v_safe) / rho_up if rho_up > 0 else 0.0
+
+
+def mobility_v_wait_avg(d_kj, v_kv, rho_down):
+    """
+    Average speed of robot v during the waiting (deceleration) phase of task j (Eq. 18).
+
+    v^wait_{k,v,j} = v_{k,v} - 0.5*rho^down*d_{k,j}         if d_{k,j} <= v_{k,v}/rho^down
+                   = v_{k,v}^2 / (2*rho^down*d_{k,j})        if d_{k,j} > v_{k,v}/rho^down
+
+    Derived from Eq. (15): integral of v^safe_{k,v,j}(u) over [0, d_{k,j}].
+
+    Args:
+        d_kj    : effective waiting time (s)
+        v_kv    : nominal traveling speed (m/s)
+        rho_down: deceleration rate (m/s^2)
+    Returns:
+        average speed during deceleration/stop phase (m/s)
+    """
+    if d_kj <= 0:
+        return v_kv
+    if rho_down <= 0:
+        return v_kv
+    threshold = v_kv / rho_down
+    if d_kj <= threshold:
+        return v_kv - 0.5 * rho_down * d_kj
+    else:
+        return (v_kv ** 2) / (2.0 * rho_down * d_kj)
+    
+
+    
+    
+
+
+def mobility_v_up_avg(v_kv, d_kj, rho_down):
+    """
+    Average speed of robot v during the speed recovery phase (Eq. 17).
+
+    v^up_{k,v,j} = (v^safe_{k,v,j}(d_{k,j}) + v_{k,v}) / 2
+
+    Args:
+        v_kv    : nominal traveling speed (m/s)
+        d_kj    : effective waiting time (s)
+        rho_down: deceleration rate (m/s^2)
+    Returns:
+        average speed during acceleration recovery phase (m/s)
+    """
+    v_safe = mobility_v_safe(d_kj, v_kv, rho_down)
+    return (v_safe + v_kv) / 2.0
+
+
+def mobility_S(d_nom, task_delays, v_kv, rho_down, rho_up):
+    """
+    Total distance traveled by robot v within the nominal time budget d_nom (Eq. 19).
+
+    S_{k,v} = (d_nom - sum_j(d_{k,j} + d^up_{k,v,j})) * v_{k,v}
+            + sum_j(d_{k,j} * v^wait_{k,v,j} + d^up_{k,v,j} * v^up_{k,v,j})
+
+    Key insight: d_nom is a FIXED TIME WINDOW, not the actual travel time.
+    S_{k,v} <= road_length when there are delays, so the robot is short on
+    distance and needs extra time (d_nom + (road - S)/v_kv) to finish.
+
+    Assumption (non-overlap): each task j is assumed to arrive after the robot
+    has fully recovered to v_kv from task j-1.  If tasks overlap, the formula
+    underestimates the total slowdown.
+
+    Args:
+        d_nom      : nominal driving time (s) = road_length / v_kv
+        task_delays: list of effective waiting times d_{k,j} (s) per task j
+        v_kv       : nominal traveling speed (m/s)
+        rho_down   : deceleration rate (m/s^2)
+        rho_up     : acceleration rate (m/s^2)
+    Returns:
+        S (m): distance covered in d_nom seconds under computation-induced slowdown
+    """
+    if d_nom <= 0 or v_kv <= 0:
+        return d_nom * v_kv  # = road_length, no delays
+
+    sum_slow = 0.0
+    sum_weighted = 0.0
+    for d_kj in task_delays:
+        d_up = mobility_d_up(v_kv, d_kj, rho_down, rho_up)
+        vw   = mobility_v_wait_avg(d_kj, v_kv, rho_down)
+        vu   = mobility_v_up_avg(v_kv, d_kj, rho_down)
+        sum_slow     += d_kj + d_up
+        sum_weighted += d_kj * vw + d_up * vu
+
+    if sum_slow >= d_nom:
+        # All of d_nom is consumed by slow phases (tasks overlap).
+        # The paper's non-overlap term (d_nom - sum_slow)*v_kv is negative and
+        # physically meaningless here.  Instead, scale the weighted distance
+        # proportionally to the fraction of slow-time that fits in d_nom:
+        #   S = sum_weighted * (d_nom / sum_slow)
+        #   v_eff = S / d_nom = sum_weighted / sum_slow <= v_kv 
+        # Proof: vw_j <= v_kv and vu_j <= v_kv
+        #   => sum_weighted <= v_kv * sum_slow
+        #   => sum_weighted / sum_slow <= v_kv 
+        return sum_weighted * (d_nom / sum_slow)
+
+    # Normal case (non-overlap holds): nominal-speed portion + slow phases.
+    return (d_nom - sum_slow) * v_kv + sum_weighted
+
+
+def mobility_v_eff(d_nom, task_delays, v_kv, rho_down, rho_up):
+    """
+    Effective average speed v^eff_{k,v} = S_{k,v} / d_nom (Eq. 20).
+
+    Used in paper analysis:
+      - Theorem 1 feasibility check (Eq. 26): v_eff >= |r_k| / tau
+      - Maximum tolerable delay bound (Eq. 23)
+      - Constraint C5 deadline feasibility in the optimization problem (P1)
+
+    NOTE: for simulation travel-time computation use mobility_seg_time() instead,
+    which gives the exact value t = d_nom + (road - S) / v rather than this
+    conservative approximation road / v_eff = road^2 / (v * S).
+    """
+    if d_nom <= 0 or v_kv <= 0:
+        return v_kv
+    S = mobility_S(d_nom, task_delays, v_kv, rho_down, rho_up)
+    if S/d_nom > v_kv:
+        # This can happen when d_nom is very small and the robot barely decelerates.
+        # In this case, the effective speed cannot exceed the nominal speed.
+        raise ValueError(f"Calculated effective speed {S/d_nom:.2f} exceeds nominal speed {v_kv:.2f}. Check inputs.")
+    
+    print(f"mobility_v_eff: d_nom={d_nom:.2f}s, S={S:.2f}m, v_kv={v_kv:.2f}m/s => v_eff={S/d_nom:.2f}m/s")
+    return S / d_nom
+
+
+def mobility_seg_time(road_length, task_delays, v_kv, rho_down, rho_up):
+    """
+    Exact actual travel time for a road segment under computation-induced slowdown.
+
+    Derivation:
+        d_nom = road_length / v_kv          (nominal time at full speed)
+        S     = mobility_S(d_nom, ...)      (distance covered in d_nom seconds)
+        extra = (road_length - S) / v_kv    (extra time to cover the gap at v_kv)
+        t_actual = d_nom + extra
+            = road_length/v_kv + (road_length - S)/v_kv
+            = (2*road_length - S) / v_kv
+
+    Why this differs from road_length / v_eff (the paper's Eq. 21 approximation):
+        road_length / v_eff  = road_length * d_nom / S  = road_length^2 / (v_kv * S)
+        t_actual             = (2*road_length - S) / v_kv
+    They agree only when S = road_length (no delays).  The paper's form is a
+    conservative approximation (slightly overestimates travel time).
+
+    Args:
+        road_length: segment or mission route length (m)
+        task_delays: list of d_{k,j} values (s)
+        v_kv       : nominal speed (m/s)
+        rho_down / rho_up: decel / accel rates (m/s^2)
+    Returns:
+        actual travel time (s) >= road_length / v_kv
+    """
+    if road_length <= 0 or v_kv <= 0:
+        return 0.0
+    d_nom = road_length / v_kv
+    S = mobility_S(d_nom, task_delays, v_kv, rho_down, rho_up)
+    # Remaining distance after d_nom seconds, covered at nominal speed
+    return d_nom + max(0.0, road_length - S) / v_kv
 
 '''
 the below is observer pattern to notify the finish task
@@ -213,7 +411,8 @@ class Vehicle(Observer):
     """
     
     id = 0
-    def __init__(self, cpu_freqz, cur_pos, map, tau = 120, verbose=False, sts = 0, non_priority_orders=False):
+    def __init__(self, cpu_freqz, cur_pos, map, tau = 120, verbose=False, sts = 0, non_priority_orders=False,
+                 rho_down=None, rho_up=None, v_nominal=None):
         #sts: là giá trị thể hiện rằng liệu phương tiện có chọn task by task ko
         self.__cpu_freqz = cpu_freqz
         self.__cur_pos = cur_pos
@@ -235,6 +434,13 @@ class Vehicle(Observer):
         self.__mec = random_bs_num(map.get_intersections())
         self.__non_priority_orders = non_priority_orders
         self.__order = []
+
+        # Mobility parameters for the parallel mobility-computation model (Paper Sec. II.C)
+        # Falls back to vehicle_cfg defaults when not explicitly supplied.
+        self.__v_nominal = v_nominal if v_nominal is not None else vehicle_cfg['v_nominal']
+        self.__rho_down  = rho_down  if rho_down  is not None else vehicle_cfg['rho_down']
+        self.__rho_up    = rho_up    if rho_up    is not None else vehicle_cfg['rho_up']
+
         
     def get_vid(self):
         return self.__vid
@@ -300,8 +506,13 @@ class Vehicle(Observer):
             for idx, val in enumerate(sol):
                 #val = order and vehicle
                 if val[1] == self.__vid and val not in completed_set:
-                    i = missions.index(int(idx))
-                    mis = missions[i]
+                    try:
+                        i = missions.index(int(idx))
+                        mis = missions[i]
+                    except Exception as e:
+                        print(f"Error finding mission with index {idx}: {e}")
+                        print(f"list of missions: {[m.get_mid() for m in missions]}")
+                        exit(1)
                     if len(mis.get_depends()) == 0:
                         mis.update_status(1)                     
                     if self.__non_priority_orders and mis.get_status() == 1:
@@ -497,7 +708,7 @@ class Vehicle(Observer):
         segments = self.__map.get_segments()
  
         completed_cnt = 0
-        total_delay = distance_to_mission/10 #thời gian xe đến vị trí của nhiệm vụ, bỏ qua thời gian offloading time, tốc độ trung bình 10 m/s.
+        total_delay = distance_to_mission / self.__v_nominal  # Eq. (21): travel time to mission start
         if len(best_trajectrory_to_mission)>0:
             best_trajectrory_to_mission.remove(best_trajectrory_to_mission[-1]) #loaị bỏ điểm cuối cùng là điểm bắt đầu nhiệm vụ
         trajectory = best_trajectrory_to_mission + trajectory
@@ -508,15 +719,18 @@ class Vehicle(Observer):
             idx= segments.index(points)
             
             cur_seg = segments[idx]
-            _, aver_speed = cur_seg.get_infor()
+            _, aver_speed = cur_seg.get_infor() #m/s
             #offloadingtask is a dict key = seg_id, val = list of offoadling task
             offload_task = cur_seg.get_offloading_tasks()
-            offloading_delay = 0
             
-            current_road_long = cur_point.get_dis_to_point(trajectory[0])
-            on_road_time = current_road_long/aver_speed
-            
+            current_road_long = cur_point.get_dis_to_point(trajectory[0]) #m
+            # Nominal driving time for this segment (denominator of Eq. 20)
+            d_nom_seg = current_road_long / aver_speed if aver_speed > 0 else 0.0 # second
+
             cur_offloading_delay = 0
+            # Collect per-task effective waiting delays for the parallel mobility model
+            task_delays_seg = []
+            print(f"Vehicle {self.__vid} processing segment {cur_point} -> {trajectory[0]} with {len(offload_task)} offloading tasks, segment length {current_road_long:.2f}m, nominal time {d_nom_seg:.2f}s")
             for offt in offload_task:
                 '''
                 Trong thực tế chúng ta sẽ không biết đc khoảng thời gian giữa hai lần offloading.
@@ -542,20 +756,43 @@ class Vehicle(Observer):
                     new_y = current_line_of_road.calculate_point(new_x)
                     new_points = Point(x = new_x, y=new_y)
                     
-                # rate and cpu computation capacity
-                rate, cpu_freq = get_rate_and_mec_cpu(new_points, self.__mec)
+                # rate, cpu_freq, and the shared ComputeNode for this MEC server
+                rate, cpu_freq, compute_node = get_rate_and_mec_cpu(new_points, self.__mec)
                 task_ifor = offt.get_task()
-                #delay
-                communtion_delay = task_ifor[0]*8000/rate
-                computing_delay = task_ifor[1]/cpu_freq #ignore the queuing delay
-            
+                # Uplink transmission delay: Eq. (7)  d^com = alpha_{k,j} / R_{v,e}
+                communtion_delay = task_ifor[0] * 8000 / rate
+                # Queueing delay: Eq. (9)  d^queue = E[D^queue | |q^cmp_x|]
+                # task_arrive() snapshots the current queue length THEN increments it,
+                # so this task "sees" all tasks that arrived before it.
+                d_queue = compute_node.task_arrive()
+                # Total computation delay: Eq. (8)  d^cmp = d^queue + beta_{k,j} / F_x
+                computing_delay = d_queue + task_ifor[1] / cpu_freq
+                                
                 if self.verbose:
-                    print(rate, cpu_freq, communtion_delay, computing_delay)
+                    print(rate, cpu_freq, communtion_delay, computing_delay, f"(d_queue={d_queue:.4f}, q_size={compute_node.queue_size})")
                 same_longest_road_mis.update_profit(-task_cfg['cost_coefi'])
-                cur_offloading_delay = communtion_delay+ computing_delay
-                offloading_delay += cur_offloading_delay
-                
-            total_delay += offloading_delay + on_road_time
+
+                exe_delay = communtion_delay + computing_delay
+                # Effective waiting time: Eq. (12)  d_{k,j} = min(exe_delay, d^max_{k,j})
+                # (d^max is assumed non-binding per segment; user can add d_max enforcement)
+                task_delays_seg.append(exe_delay)
+                cur_offloading_delay = exe_delay
+                # Task finishes processing after exe_delay; decrement the MEC queue.
+                # In sequential simulation this means the task departs before the next
+                # task on this segment arrives (no overlap within one vehicle).
+                # With shared ComputeNode across vehicles, cross-vehicle contention is
+                # captured automatically via the thread-safe counter.
+                compute_node.task_depart()
+
+            # Parallel mobility-computation model (Eqs. 19–21):
+            # v^eff = S_{k,v} / d_nom  (Eq. 20), then t = road / v^eff  (Eq. 21).
+            v_eff_seg = mobility_v_eff(
+                d_nom_seg, task_delays_seg, aver_speed,
+                self.__rho_down, self.__rho_up
+            )
+            
+            seg_time = current_road_long / v_eff_seg if v_eff_seg > 0 else d_nom_seg
+            total_delay += seg_time
             
             while cur_point in end_points:
                 end_points.remove(cur_point)
@@ -899,11 +1136,11 @@ class TaskGenerator:
 def generate(mission_f_name = "mission_information.json"):
     map = Map(map_cfg['n_lines'], busy=map_cfg['busy'], fromfile=map_cfg['fromfile'])
     tg = TaskGenerator(tau = task_cfg['tau'], map=map,
-                       mincompsize=task_cfg['comp_size'][0],
-                       maxcompsize=task_cfg['comp_size'][1],
-                       mindatasize=task_cfg['comm_size'][0],
-                       maxdatasize=task_cfg['comm_size'][1],
-                       )
+                    mincompsize=task_cfg['comp_size'][0],
+                    maxcompsize=task_cfg['comp_size'][1],
+                    mindatasize=task_cfg['comm_size'][0],
+                    maxdatasize=task_cfg['comm_size'][1],
+                    )
     tg.gen_tasks()
     tg.gen_mission(mission_cfg['n_mission'], file = mission_f_name)
 if __name__ == "__main__":
