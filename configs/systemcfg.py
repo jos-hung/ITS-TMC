@@ -20,13 +20,17 @@ log_configs = {
 apply_thread = 0
 apply_detach = 0
 score_window_size = 100
-tau = 60
+tau = 120
 mission_cfg = {
     'n_mission': 25,
     'benifits': [50,100],
     'n_vehicle': 5,
     'n_miss_per_vec': 5
 }
+
+apply_early_stopping = False #proposed 1 trong paper
+apply_offloading_based_max_allow_average_delay = True #proposed 2 trong paper
+apply_robots_training = True 
 
 ppo_cfg = {
     'benifits': [50,100],
@@ -129,8 +133,8 @@ map_cfg = {
 }
 network_cfg = {
     "n_MEC":20,
-    "CPU_freq": [100, 300],#hz
-    "CPU_satelite": 50, #hz
+    "CPU_freq": [100, 300],#mcycles
+    "CPU_satelite": 50, #mcycles
     "satelite_distance": 1000, #km
     "path_loss": 3,
     "channel_gain": "Gausian",
@@ -143,6 +147,7 @@ vehicle_cfg = {
     'v_min': 0.0,        # minimum safe speed v^min_v (m/s)
     'rho_down': 2.0,     # safe deceleration rate rho^down_v (m/s^2)
     'rho_up': 2.0,       # acceleration rate rho^up_v (m/s^2)
+    'cpu_freqz': 10.0, # CPU capacity f^max_v (mcycles/s)
 }
 
 eval = False
@@ -150,8 +155,8 @@ ddqn_cfg = {
     "discount_factor":0.95,
     "learning_rate": 1e-5,
     "epsilon": 1.0,
-    "epsilon_decay": 0.99,
-    "epsilon_min": 0.05,
+    "epsilon_decay": 0.999,
+    "epsilon_min": 0.1,
     "batch_size": 512,
     "maxlen_mem": 10000000,
     "modify_reward": True,

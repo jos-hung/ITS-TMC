@@ -20,7 +20,7 @@ import numpy as np
 from ray.tune.registry import register_env
 from gymnasium.spaces import Box
 import numpy as np
-from configs.systemcfg import map_cfg, mission_cfg, avg_reward, eval, ddqn_cfg
+from configs.systemcfg import map_cfg, mission_cfg, avg_reward, eval, ddqn_cfg, apply_robots_training
 from configs.config import ParaConfig
 from utils import Load, write_config, write_config_not_fromfile
 import threading
@@ -362,9 +362,10 @@ class ITSEnv(gym.Env):
         return obs
     
     def update_action(self, action):
-        action = int(np.argmax(action[1]))
+        if type(action) is not int:
+            action = int(np.argmax(action))
         self.action_memory[action]=1  
-          
+
     def update_mem_obs(self, obs, v_id):
         action_memory = np.array(self.action_memory).flatten()
         obs[f"vehicle_{v_id}"][self.idx_dict_obs['action_memory']:self.idx_dict_obs['action_memory']+len(action_memory)]=action_memory
@@ -382,7 +383,76 @@ class ITSEnv(gym.Env):
         print("numbers of completed solution",self.solution)
         return stop
     
-    def step(self, action_dict, agents = None, states = None):
+    def step(self, actions, agents = None, states = None, actions_list = False):
+        if not actions_list:
+            return self.step_action_single(actions, agents, states)
+        else:
+            return self.step_action_list(actions, agents, states)
+    def step_action_list(self, actions, agents = None, states = None):
+        rewards = {}
+        total_complet_tasks = 0
+        total_benef_tasks = 0
+        # completed_mission_ids = []
+        terminateds = []  # Track episode termination
+        truncateds = []   # Track episode truncation
+        infos = []        # Per-agent
+
+        wrong_action_penalty = {key: 0 for key in range(0, len(self.vehicles))}
+        
+        solution = [-1]*self.data['n_missions']
+        for idx, sol in enumerate(actions):
+            for s in sol:
+                solution[s] = idx
+        
+        for idx in range(self.data['n_vehicles']):
+            self.vehicles[idx].set_mission(solution, self.missions)
+        
+        #clear total_reward for calcule again with new set of mission:
+        for v in self.vehicles:
+            v.clear_total_reward()
+        #     v.fit_order()
+            
+        done_process_infors = []
+    
+        while (1):
+            count_done = 0
+            terminate = True
+            for idx, v in enumerate(self.vehicles):
+                done_process_infor = v.process_mission(self.missions)
+                done_process_infors.append(done_process_infor)
+                if done_process_infor==None:
+                    count_done += 1
+            for v in self.vehicles:
+                if v.inprocess():
+                    terminate = False
+            if terminate:
+                break
+        total_system_profit = 0
+        intime = False        
+        all_rewards = []
+        for idx, v in enumerate(self.vehicles):
+            prof_sys = v.get_profit_by_forall_missions()
+            total_complet_tasks += v.get_earn_completes()
+            all_rewards.append(prof_sys)
+
+            if v.check_time():
+                intime = True
+                
+        terminateds = self.current_step >= self.max_steps or (np.array(self.action_memory) == 1).all() or intime == False
+        truncateds = False  # Assuming no truncation in this example
+        if terminateds or (count_done == self.data['n_vehicles']):
+            print(self.action_memory)
+            self.done = True
+        else:
+            self.done = False
+        self.current_step += 1
+        obs = self.get_observations()
+        if self.verbose:
+            print(self.action_memory)
+            print("---> total_prof_sys {} total_complet_tasks {} total_benef_tasks {}".format(total_system_profit,total_complet_tasks,total_benef_tasks))
+        return obs, all_rewards, self.done, truncateds, done_process_infors, None
+     
+    def step_action_single(self, action_dict, agents = None, states = None):
         rewards = {}
         total_complet_tasks = 0
         total_benef_tasks = 0

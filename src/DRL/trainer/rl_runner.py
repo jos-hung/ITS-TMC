@@ -7,7 +7,7 @@ import threading
 from threading import active_count
 import sys
 from physic_definition.system_base.ITS_based import TaskGenerator
-from configs.systemcfg import avg_reward, ddqn_cfg, mission_cfg, ppo_cfg, a2c_cfg, ddpg_cfg
+from configs.systemcfg import avg_reward, ddqn_cfg, mission_cfg, ppo_cfg, a2c_cfg, ddpg_cfg, apply_robots_training
 # plt.style.use('dark_background')
 import copy
 
@@ -62,7 +62,7 @@ class RLTrainer:
         else:
             print(f"Folder '{self.checkpoints_dir}' existed.")
     
-    def step_env(self, actions, states):
+    def step_env(self, actions, states, action_list=False):
         """
         Realizes actions in environment and returns relevant attributes.
 
@@ -81,7 +81,7 @@ class RLTrainer:
         """
 
         # From environment information, extract states and rewards.
-        env_info = self.env.step(actions, self.agents, states)
+        env_info = self.env.step(actions, self.agents, states, action_list)
         next_states = env_info[0]
         rewards = env_info[1]
         
@@ -406,20 +406,25 @@ class RLTrainer:
             # Initiate learning for agent if update frequency is observed.
             if self.agents[0].train_start < self.timestep and self.timestep >self.start_train and self.timestep%self.env.data['n_miss_per_vec']==0:
                 threads = []
+                count_update_head_agent = int(self.timestep%len(self.agents))
                 for idx, agent in enumerate(self.agents):
+                    head_update = False
+                    if idx == count_update_head_agent and np.random.rand() > 0.99:
+                        head_update = True
+                        
                     if self.thread == False:
-                        agent.train_model()
+                        agent.train_model(head_update)
                     else:
-                        update_thread = threading.Thread(target=agent.train_model)
+                        update_thread = threading.Thread(target=agent.train_model, args=(head_update,))
                         if self.detach_thread:
                             update_thread.daemon = True
+                            # print("training via a detach thread: {}".format(idx))
                             update_thread.start()
+                            pass
                         else:
                             update_thread.start()
                             threads.append(update_thread)
-                if self.detach_thread==False:
-                    for idx, thread in enumerate(threads):
-                        thread.join()
+                            pass
             if self.timestep > 0 and self.timestep%1000==0:
                 for idx, agent in enumerate(self.agents):
                     if hasattr(agent, 'update_target_model'):
@@ -431,6 +436,150 @@ class RLTrainer:
             if np.any(dones):
                 break
             states = next_states
+        self.do_modify_reward(modify_reward)
+        return scores
+    
+    def run_episode_modify_reward_for_robots(self):
+        """
+        Runs a single episode with reward modification enabled.
+        
+        This method collects all episode data and applies reward shaping
+        at the end of the episode based on task completion metrics.
+
+        Returns:
+            scores: List of rewards gained at each timestep.
+        """      
+        # Initialize list to hold reward values at each timestep.
+        scores = []
+        actions = []
+        for i in range(self.env.data['n_vehicles']):
+            scores.append([])
+            actions.append([])
+
+        # Restart the environment and gather original states.
+        env_info = self.env.reset()
+        states = env_info[0]
+
+        # Act and evaluate results and networks for each timestep.
+        actionssss = []
+        modify_reward = {"step": [], 'state': [], 'action':[], 'action_indices': [], 'current_wards':[], 'next_state':[], 'modified_infor':[], 'dones': []}
+        for t in range(self.env.data['n_miss_per_vec']):
+            self.timestep += 1
+            # Sample actions for each agent while keeping track of states,
+            # actions and log probabilities.
+            processed_states, actions_save, log_probs = [], [], []
+            action_indices_step = []
+            modify_reward['state'].append(states)
+            modify_reward['step'].append(t)
+            
+            for idx, state in enumerate(states):
+                
+                agent = self.agents[idx]
+                observationip = np.reshape(states[state], (1, -1))
+                processed_state = torch.from_numpy(observationip).float()
+                action, _ = agent.get_actions(processed_state, idx)
+                
+                agent_type = type(agent).__name__
+                LOGIT_CLIP = 10.0
+                if agent_type in ["PPOAgent", "A2CAgent"]:
+                    logits = action[1]
+                    print("logits before clip: ", logits) #no clip
+                    dist = torch.distributions.Categorical(logits=logits)
+                    action_sample = dist.sample()
+                    action_idx = int(action_sample.item())
+                    log_prob = dist.log_prob(action_sample)
+                    log_probs.append(log_prob)
+        
+                elif agent_type == "DDPGAgent":
+                    noise = torch.normal(0, 0.1, size=action[1].squeeze(0).shape)
+                    action_scores = action[1].squeeze(0) + noise
+                    action_idx = int(torch.argmax(action_scores).item())
+                    log_probs.append(None)
+                elif agent_type == "DDQNAgent":
+                    if agent.epsilon > agent.generator.random():
+                        action_idx = np.random.randint(0, action[1].shape[1])
+                    else:
+                        action_idx = int(np.argmax(action[1]))
+                    log_probs.append(None)
+                else:
+                    raise ValueError(f"Unsupported agent type: {agent_type}")
+
+                if any(torch.equal(processed_state, item) for item in processed_states) \
+                    and action_idx in actionssss:
+                    continue
+                if self.env.action_memory[action_idx] == 1:
+                    scores[idx].append(-0.01*avg_reward)
+                    # modify_reward['action'].append([-1])
+                    actionssss.append(-1)
+                    continue
+                actionssss.append(action_idx)
+                processed_states.append(processed_state)
+                actions[idx].append(action_idx)
+                actions_save.append(action[1])
+                action_indices_step.append(action_idx)
+                self.env.update_action(action_idx)
+                scores[idx].append(0)
+                # modify_reward['action'].append([action_idx])
+                modify_reward['action_indices'].append(action_indices_step)
+            modify_reward['action'].append(actionssss)  
+            
+                
+            states = self.env.get_observations()
+            modify_reward['next_state'].append(states)
+        
+        # Realize sampled actions in environment and evaluate new state.
+        next_states, rewards, dones, truncated, done_process_infor, action_dict = self.step_env(actions, states, action_list = True)
+        dones = [dones]*len(states)
+        print(rewards)
+        for idx_ in range(self.env.data['n_miss_per_vec']):
+            temp_reward =   {}
+            for agent_idx in range(len(self.agents)):
+                if scores[agent_idx][idx_] >= 0:
+                    mission_id = actions[agent_idx].pop(0)
+                    try:            
+                        temp_reward[agent_idx] = [rewards[agent_idx][mission_id]]
+                        scores[agent_idx][idx_] += rewards[agent_idx][mission_id]
+                    except:
+                        temp_reward[agent_idx] = [scores[agent_idx][idx_]]
+                else:
+                    temp_reward[agent_idx] = [scores[agent_idx][idx_]]
+            modify_reward['current_wards'].append(temp_reward)
+            modify_reward['dones'].append(dones)
+        print(scores)
+        modify_reward['modified_infor'].append(done_process_infor)
+        # modify_reward['dones'].append(dones)
+        # Initiate learning for agent if update frequency is observed.
+        
+        if self.agents[0].train_start < self.timestep and self.timestep >self.start_train and self.timestep%self.env.data['n_miss_per_vec']==0:
+            threads = []
+            count_update_head_agent = int(self.timestep%len(self.agents))
+            for idx, agent in enumerate(self.agents):
+                head_update = False
+                if idx == count_update_head_agent and np.random.rand() > 0.99:
+                    head_update = True
+                    
+                if self.thread == False:
+                    agent.train_model(head_update)
+                else:
+                    update_thread = threading.Thread(target=agent.train_model, args=(head_update,))
+                    if self.detach_thread:
+                        update_thread.daemon = True
+                        # print("training via a detach thread: {}".format(idx))
+                        update_thread.start()
+                        pass
+                    else:
+                        update_thread.start()
+                        threads.append(update_thread)
+                        pass
+        if self.timestep > 0 and self.timestep%1000==0:
+            for idx, agent in enumerate(self.agents):
+                if hasattr(agent, 'update_target_model'):
+                    agent.update_target_model()
+    
+        # # End episode if desired score is achieved.
+        # if np.any(dones):
+        #     break
+        states = next_states
         self.do_modify_reward(modify_reward)
         return scores
 
@@ -581,8 +730,10 @@ class RLTrainer:
         else:  # DDQNAgent or default
             use_modify_reward = ddqn_cfg.get('modify_reward', False)
         
-        if use_modify_reward:
+        if use_modify_reward and not apply_robots_training:
             scores = self.run_episode_modify_reward()
+        elif use_modify_reward and apply_robots_training:
+            scores = self.run_episode_modify_reward_for_robots()
         else:
             scores = self.run_episode()
             print("Not run episode with modify reward")
@@ -631,9 +782,9 @@ class RLTrainer:
             axis=0
         )
         agent_info = ''.join(f'Mean Reward Agent_{i}: {mean_reward[i]:.2f}, '
-                             for i in range(len(self.agents)))
+                            for i in range(len(self.agents)))
         max_mean = np.max(self.score_history[-self.score_window_size:],
-                          axis=1).mean()
+                        axis=1).mean()
         mean_eps_len = np.mean(
             self.episode_length_history[-self.score_window_size:]
         ).item()

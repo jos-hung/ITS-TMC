@@ -6,6 +6,7 @@ sys.path.append(os.path.dirname(parent_dir))
 
 from trainer.rl_runner import RLTrainer
 from trainer.ddqn_agent import DDQNAgent
+from trainer.shared_network import SharedQueueHead
 from trainer.advanced_agents import PPOAgent, A2CAgent, DDPGAgent
 import numpy as np
 import torch
@@ -46,7 +47,7 @@ def create_agent(state_size, action_size, actor_fc1_units=64,
                 num_updates=100, max_eps_length=500, eps_clip=0.3,
                 critic_loss=0.5, entropy_bonus=0.01, batch_size=256, 
                 agent_idx=0, load_from_file=False, ckpt_idx = 0, 
-                ppo=False, algorithm="ddqn"):
+                ppo=False, algorithm="ddqn", share_head_net=None):
 
     """
     This function creates an agent with specified parameters for training.
@@ -86,7 +87,7 @@ def create_agent(state_size, action_size, actor_fc1_units=64,
         checkpoint_path = "./checkpoints/agent_" + str(agent_idx) +'_'+str(ckpt_idx)+ '.pth'
     algorithm = algorithm.lower()
     if algorithm == "ddqn":
-        agent = DDQNAgent(state_size=state_size, action_size=action_size, checkpoint_path=checkpoint_path, load_model=load_from_file)
+        agent = DDQNAgent(state_size=state_size, action_size=action_size,share_head_net=share_head_net, checkpoint_path=checkpoint_path, load_model=load_from_file)
     elif algorithm == "ppo":
         agent = PPOAgent(state_size=state_size, action_size=action_size, checkpoint_path=checkpoint_path, load_model=load_from_file)
     elif algorithm == "a2c":
@@ -250,6 +251,11 @@ def ddqn(**kwargs):
     state_size = np.prod(env.observation_space.shape)
     action_size = env.action_space.shape[0] 
     # Initialize agents for training.
+    #auto apply a shared head network for ddqn agents
+    
+    hidden_dim = int(state_size*0.5)
+    output_dim = int(state_size*0.3)
+    share_head_net = SharedQueueHead(output_dim=output_dim, hidden_dim=hidden_dim, input_dim=state_size).to(device)
     agents = [
         create_agent(
             state_size,
@@ -258,6 +264,7 @@ def ddqn(**kwargs):
             load_from_file=False,
             ckpt_idx=0,
             algorithm="ddqn",
+            share_head_net = share_head_net
         )
         for i in range(num_agents)
     ]

@@ -46,10 +46,22 @@ def _parse_args():
     p = argparse.ArgumentParser(description="SCA Upper Bound for Problem (P1)")
     p.add_argument("--ub-only",   action="store_true",
                 help="Only compute the LP upper bound; skip full simulation of rounded solution.")
-    p.add_argument("--max-iter",  type=int,   default=100,
+    p.add_argument("--max-iter",  type=int,   default=10,
                 help="Maximum SCA iterations (default: 30).")
     p.add_argument("--tol",       type=float, default=1e-3,
                 help="Convergence tolerance on UB change (default: 1e-3).")
+    p.add_argument("--gamma",     type=float, default=0.5,
+                help="Damped SCA step size in (0,1]. Smaller values are more stable.")
+    p.add_argument("--queue-alpha", type=float, default=1.0,
+                help="Queue-delay coupling strength. Lower values reduce oscillation.")
+    p.add_argument("--min-iter",  type=int,   default=8,
+                help="Minimum SCA iterations before convergence check is allowed.")
+    p.add_argument("--obj-rel-tol", type=float, default=1e-4,
+                help="Relative objective-change tolerance for convergence.")
+    p.add_argument("--var-tol",   type=float, default=1e-3,
+                help="Max iterate-change tolerance (inf-norm) for convergence.")
+    p.add_argument("--conv-patience", type=int, default=3,
+                help="Number of consecutive stable iterations required to stop.")
     p.add_argument("--n-trials",  type=int,   default=10,
                 help="Number of independent trials to average over (default: 5).")
     p.add_argument("--drl-csv",   type=str,   default=None,
@@ -87,6 +99,7 @@ def run_sca_upper_bound(args):
     print("=" * 60)
     t0 = time.perf_counter()
     data, graph, lmap, missions = load_problem_data()
+    
     print(f"  Loaded {len(missions)} missions in {time.perf_counter()-t0:.2f}s")
 
     n_vehicles     = mission_cfg['n_vehicle']
@@ -97,6 +110,11 @@ def run_sca_upper_bound(args):
 
     for trial in range(args.n_trials):
         print(f"\n--- Trial {trial + 1} / {args.n_trials} ---")
+        data, graph, lmap, missions = load_problem_data()
+        trial_rng = np.random.default_rng(42 + trial)
+        initial_positions = [
+            trial_rng.choice(data["segments"]).get_endpoints()[0] for _ in range(n_vehicles)
+        ]
 
         # ---- SCA solver ----
         sca = SCAUpperBound(
@@ -106,6 +124,13 @@ def run_sca_upper_bound(args):
             tau_sec        = task_cfg['tau'] * 60,
             max_iter       = args.max_iter,
             tol            = args.tol,
+            gamma          = args.gamma,
+            queue_alpha    = args.queue_alpha,
+            initial_positions = initial_positions,
+            min_iter       = args.min_iter,
+            obj_rel_tol    = args.obj_rel_tol,
+            var_tol        = args.var_tol,
+            conv_patience  = args.conv_patience,
             seed           = 42 + trial,
         )
         t_sca = time.perf_counter()
@@ -127,6 +152,8 @@ def run_sca_upper_bound(args):
                 graph        = graph,
                 lmap         = lmap,
                 verbose      = False,
+                sol          = info.get("sol_lp"),
+                initial_positions = initial_positions,
             )
             print(f"  Sim done in {time.perf_counter()-t_sim:.3f}s  "
                 f"| profit={sim_res['total_profit']:.4f}  "

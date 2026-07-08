@@ -77,18 +77,18 @@ class _MLP(nn.Module):
         self.input = nn.Sequential(
             nn.LayerNorm(in_dim),
             nn.Linear(in_dim, hidden),
-            nn.Tanh(),
+            # nn.Tanh(),
         )
 
         self.block1 = nn.Sequential(
             nn.Linear(hidden, hidden),
-            nn.Tanh(),
+            # nn.Tanh(),
             nn.Linear(hidden, hidden),
         )
 
         self.block2 = nn.Sequential(
             nn.Linear(hidden, hidden),
-            nn.Tanh(),
+            # nn.Tanh(),
             nn.Linear(hidden, hidden),
         )
 

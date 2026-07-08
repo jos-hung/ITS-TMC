@@ -26,10 +26,16 @@ from configs.systemcfg import ddqn_cfg, eval
 class DDQNAgent(nn.Module):
     global_memory = deque(maxlen=ddqn_cfg['maxlen_mem'])
     
-    def __init__(self, state_size, action_size, checkpoint_path = './', load_model = False):
+    def __init__(self, state_size, action_size, share_head_net = None, checkpoint_path = './', load_model = False):
         super(DDQNAgent, self).__init__()
         self.load_model = load_model
 
+        self.has_share_head_net = False
+        
+        if share_head_net is not None:
+            self.share_head_net = share_head_net
+            self.has_share_head_net = True
+        
         self.state_size = state_size
         self.action_size = action_size
 
@@ -61,25 +67,34 @@ class DDQNAgent(nn.Module):
         self.lock = Lock()
 
     def build_model(self):
-        layer_size_1 = self.state_size + int(self.state_size*0.3)
-        layer_size_2 = int(self.state_size*0.6)        
-        layer_size_3 = int(self.state_size*0.2)
+        #recompute layer sizes based on state size if self.has_share_head_net is True, otherwise use default sizes
+        if self.has_share_head_net:
+            output_dim = self.share_head_net.net[-1].out_features
+            input_dim = output_dim
+            layer_size_1 = output_dim + int(output_dim*0.3)
+            layer_size_2 = int(output_dim*0.6)
+            layer_size_3 = int(output_dim*0.2)
+        else:
+            input_dim = self.state_size      
+            layer_size_1 = self.state_size + int(self.state_size*0.3)
+            layer_size_2 = int(self.state_size*0.6)        
+            layer_size_3 = int(self.state_size*0.2)
         model = nn.Sequential(
-            nn.Linear(self.state_size, layer_size_1),
+            nn.Linear(input_dim, layer_size_1),
             nn.SELU(),
             nn.Linear(layer_size_1, layer_size_2),
             nn.SELU(),
             nn.Linear(layer_size_2, layer_size_3),
             nn.ELU(),
             nn.Linear(layer_size_3, self.action_size),
-            nn.ELU()
         )
         self.softmax = nn.Softmax(dim=1)
         return model
     
     def forward(self, x):
+        if self.has_share_head_net:
+            x = self.share_head_net(x)
         x = self.model(x)
-        #x = self.softmax(x)
         return x
 
     def save_model(self, name):
@@ -124,7 +139,7 @@ class DDQNAgent(nn.Module):
             self.global_memory.popleft()
         self.global_memory.append((state, action, reward, next_state, done))
         
-    def train_model(self):
+    def train_model(self, head_update = False):
         if eval:
             return
         if self.epsilon > self.epsilon_min:
@@ -138,18 +153,13 @@ class DDQNAgent(nn.Module):
                 mini_batch = random.sample(self.global_memory, self.batch_size)
 
             else:
-                mini_batch = random.sample(self.memory, self.batch_size)
+                return
                 
             states = np.zeros((self.batch_size, self.state_size))
             next_states = np.zeros((self.batch_size, self.state_size))
             actions, rewards, dones = [], [], []
 
             for i in range(self.batch_size):
-                # print("1, data-> ", mini_batch[i][0])
-                # print("2, data-> ", mini_batch[i][2])
-                # print("3, data-> ", mini_batch[i][3])
-                # print("4, data-> ", mini_batch[i][4])
-                
                 states[i] = mini_batch[i][0]
                 actions.append(mini_batch[i][1])
                 rewards.append(mini_batch[i][2])
@@ -161,9 +171,20 @@ class DDQNAgent(nn.Module):
             actions = torch.LongTensor(actions).unsqueeze(1).to(device)  # Tensor 2D
             rewards = torch.FloatTensor(rewards).to(device).reshape([self.batch_size])
             dones = torch.FloatTensor(dones).to(device)
-            q_values = self.model(states)  # Q-values từ model chính
-            next_q_values = self.target_model(next_states).detach()  
-
+            if not head_update and self.has_share_head_net:
+                with torch.no_grad():
+                    states = self.share_head_net(states)
+                    next_states = self.share_head_net(next_states)
+                q_values = self.model(states)  # Q-values từ model chính
+                next_q_values = self.target_model(next_states).detach()  
+            elif head_update and self.has_share_head_net:
+                states = self.share_head_net(states)
+                next_states = self.share_head_net(next_states)
+                q_values = self.model(states)  # Q-values từ model chính
+                next_q_values = self.target_model(next_states).detach()  
+            else:
+                q_values = self.model(states)  # Q-values từ model chính
+                next_q_values = self.target_model(next_states).detach()
             # Tính Q-target: Q_target = reward + (1 - done) * gamma * max(Q_next)
             max_next_q_values = next_q_values.max(dim=1)[0]
 

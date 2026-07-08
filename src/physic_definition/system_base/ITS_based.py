@@ -9,12 +9,19 @@ import matplotlib.pyplot as plt
 from physic_definition.map.graph import Graph
 import json
 import abc
-from configs.systemcfg import mission_cfg, task_cfg, map_cfg, vehicle_cfg
+from configs.systemcfg import (
+    mission_cfg,
+    task_cfg,
+    map_cfg,
+    vehicle_cfg,
+    network_cfg,
+    apply_early_stopping,
+    apply_offloading_based_max_allow_average_delay,
+)
 from physic_definition.map.map import *
 from physic_definition.network.rate import *
 import time
 import threading
-
 
 # -----------------------------------------------------------------------
 # Mobility Physics Functions (Paper Section II.C, Eqs. 13–20)
@@ -80,11 +87,6 @@ def mobility_v_wait_avg(d_kj, v_kv, rho_down):
         return v_kv - 0.5 * rho_down * d_kj
     else:
         return (v_kv ** 2) / (2.0 * rho_down * d_kj)
-    
-
-    
-    
-
 
 def mobility_v_up_avg(v_kv, d_kj, rho_down):
     """
@@ -171,13 +173,33 @@ def mobility_v_eff(d_nom, task_delays, v_kv, rho_down, rho_up):
     if d_nom <= 0 or v_kv <= 0:
         return v_kv
     S = mobility_S(d_nom, task_delays, v_kv, rho_down, rho_up)
-    if S/d_nom > v_kv:
-        # This can happen when d_nom is very small and the robot barely decelerates.
-        # In this case, the effective speed cannot exceed the nominal speed.
-        raise ValueError(f"Calculated effective speed {S/d_nom:.2f} exceeds nominal speed {v_kv:.2f}. Check inputs.")
+    v_eff = S / d_nom
+    # Strict physical bound: 0 <= v_eff <= v_kv.
+    # Only allow snap when deviation is tiny floating-point noise.
+    eps = 1e-9 * max(1.0, abs(v_kv))
+    if v_eff > v_kv:
+        if np.isclose(v_eff, v_kv, rtol=0.0, atol=eps):
+            v_eff = v_kv
+        else:
+            raise ValueError(
+                f"Calculated effective speed {v_eff:.6f} exceeds nominal speed {v_kv:.6f}. "
+                f"d_nom={d_nom:.6f}, S={S:.6f}"
+            )
+    elif v_eff < 0.0:
+        if np.isclose(v_eff, 0.0, rtol=0.0, atol=eps):
+            v_eff = 0.0
+        else:
+            raise ValueError(
+                f"Calculated effective speed {v_eff:.6f} is negative. "
+                f"d_nom={d_nom:.6f}, S={S:.6f}"
+            )
     
-    print(f"mobility_v_eff: d_nom={d_nom:.2f}s, S={S:.2f}m, v_kv={v_kv:.2f}m/s => v_eff={S/d_nom:.2f}m/s")
-    return S / d_nom
+    if os.environ.get("ITS_VERBOSE_MOBILITY", "0") == "1":
+        print(
+            f"mobility_v_eff: d_nom={d_nom:.2f}s, S={S:.2f}m, "
+            f"v_kv={v_kv:.2f}m/s => v_eff={v_eff:.2f}m/s"
+        )
+    return v_eff
 
 
 def mobility_seg_time(road_length, task_delays, v_kv, rho_down, rho_up):
@@ -212,6 +234,81 @@ def mobility_seg_time(road_length, task_delays, v_kv, rho_down, rho_up):
     S = mobility_S(d_nom, task_delays, v_kv, rho_down, rho_up)
     # Remaining distance after d_nom seconds, covered at nominal speed
     return d_nom + max(0.0, road_length - S) / v_kv
+
+
+def max_allowable_average_delay(
+    road_length,
+    tau_budget,
+    v_nom,
+    rho_down,
+    rho_up,
+    n_tasks,
+    d_hi_init=0.5,
+    d_hi_max=60.0,
+    max_iter=30,
+):
+    """Compute Theorem-1-inspired max average delay threshold for one route.
+
+    This helper numerically finds the largest per-task average delay d_bar such
+    that the route can still be completed inside tau_budget under the mobility
+    degradation model (Eqs. 19-21).
+    """
+    if road_length <= 0 or v_nom <= 0 or tau_budget <= 0:
+        return 0.0
+    if n_tasks <= 0:
+        return float("inf")
+
+    d_nom = road_length / v_nom
+    if d_nom > tau_budget:
+        return 0.0
+
+    def _travel_time(d_bar):
+        v_eff = mobility_v_eff(d_nom, [d_bar] * n_tasks, v_nom, rho_down, rho_up)
+        return road_length / max(v_eff, 1e-9)
+
+    if _travel_time(0.0) > tau_budget:
+        return 0.0
+
+    lo = 0.0
+    hi = max(d_hi_init, 1e-6)
+    while hi < d_hi_max and _travel_time(hi) <= tau_budget:
+        lo = hi
+        hi *= 2.0
+
+    if hi >= d_hi_max and _travel_time(hi) <= tau_budget:
+        return hi
+
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        if _travel_time(mid) <= tau_budget:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def choose_delay_with_threshold(remote_delay, max_avg_delay, local_delay=None):
+    """Select effective delay under max allowable average delay threshold.
+
+    Priority: keep the fastest feasible destination under threshold screening.
+    If no remote option passes the screening, fall back to local execution.
+
+    Returns:
+        (selected_delay, use_remote)
+    """
+    if not np.isfinite(max_avg_delay):
+        if local_delay is None or remote_delay <= local_delay:
+            return remote_delay, True
+        return local_delay, False
+
+    remote_ok = remote_delay <= max_avg_delay
+    local_ok = local_delay is not None and local_delay <= max_avg_delay
+
+    if remote_ok and (local_delay is None or not local_ok or remote_delay <= local_delay):
+        return remote_delay, True
+    if local_delay is not None:
+        return local_delay, False
+    return remote_delay, True
 
 '''
 the below is observer pattern to notify the finish task
@@ -256,6 +353,14 @@ class Mission(Subject):
         
         self.__profit = 50 #temp fix, we can change later
         self.verbose = verbose
+        self.__original_plan = None
+        
+    def add_original_plan(self, plan):
+        self.__original_plan = plan
+        return True
+    
+    def get_original_plan(self):
+        return self.__original_plan
     
     def get_mission_destination(self):
         return self.__desti
@@ -394,10 +499,10 @@ class Mission(Subject):
         return self.__dpart
     
     def get_desti(self):
-        return self.__dpart
+        return self.__desti
 
     def get_trajectory(self):
-        return (self.__dpart, self.__dpart)
+        return (self.__dpart, self.__desti)
     
     def get_tslot(self):
         return self.__tslot
@@ -412,7 +517,7 @@ class Vehicle(Observer):
     
     id = 0
     def __init__(self, cpu_freqz, cur_pos, map, tau = 120, verbose=False, sts = 0, non_priority_orders=False,
-                 rho_down=None, rho_up=None, v_nominal=None):
+                rho_down=None, rho_up=None, v_nominal=None):
         #sts: là giá trị thể hiện rằng liệu phương tiện có chọn task by task ko
         self.__cpu_freqz = cpu_freqz
         self.__cur_pos = cur_pos
@@ -421,6 +526,7 @@ class Vehicle(Observer):
         self.__acceptance_mis = []
         self.__map = map
         self.__vehicle_prof = 0
+        self.__profit_by_missions_id = {}
         self.__late = 0
         self.__vid = Vehicle.id
         Vehicle.id += 1
@@ -441,7 +547,41 @@ class Vehicle(Observer):
         self.__rho_down  = rho_down  if rho_down  is not None else vehicle_cfg['rho_down']
         self.__rho_up    = rho_up    if rho_up    is not None else vehicle_cfg['rho_up']
 
-        
+        # Proposed switches from configs.systemcfg.
+        self.__apply_early_stopping =  apply_early_stopping
+        self.__apply_offloading_delay_threshold = apply_offloading_based_max_allow_average_delay
+
+        # Nominal average task delay used by early-stop feasibility estimation.
+        alpha_mid = 0.5 * (task_cfg['comm_size'][0] + task_cfg['comm_size'][1]) * 8000.0
+        beta_mid = 0.5 * (task_cfg['comp_size'][0] + task_cfg['comp_size'][1])
+        avg_rate = 33e6
+        avg_cpu = 0.5 * (network_cfg['CPU_freq'][0] + network_cfg['CPU_freq'][1])
+        self.__avg_task_delay = alpha_mid / max(avg_rate, 1e-9) + beta_mid / max(avg_cpu, 1e-9)
+        dmax_cfg = task_cfg.get("dmax_wait_sec", float("inf"))
+        self.__dmax_wait = float(dmax_cfg) if dmax_cfg is not None else float("inf")
+        if self.__dmax_wait <= 0:
+            self.__dmax_wait = float("inf")
+    
+    def compute_original_plan(self):
+        start_time = 0
+        end_time = 0        
+        for mis in self.__missions[:]:
+            start_time = end_time
+            end_time += mis.get_long()[0]/self.__v_nominal
+            if end_time <= self.__tau:
+                mis.add_original_plan((start_time, end_time))
+            else:
+                self.__missions.remove(mis)
+
+    def set_plan_by_step(self, mission):
+        start_time = self.__ctrl_time
+        end_time = start_time + mission.get_long()[0]/self.__v_nominal
+        if end_time <= self.__tau:
+            return mission.add_original_plan((start_time, end_time))
+        else:
+            self.__intime = False
+        return False
+
     def get_vid(self):
         return self.__vid
     
@@ -518,8 +658,8 @@ class Vehicle(Observer):
                     if self.__non_priority_orders and mis.get_status() == 1:
                         self.__ready_mis.append(mis)
                         self.__missions.remove(mis)
-                    else:
-                        self.verify_ready()
+                    # else:
+                    #     self.verify_ready()
                     self.accept_mission(miss=mis, order = val[0])
                     completed_set.append(val)
                 
@@ -554,9 +694,11 @@ class Vehicle(Observer):
                     else:
                         ready = False
                         accept.append(mis)             
-        self.__missions= self.__acceptance_mis = accept
-        self.__acceptance_mis = accept.copy()
-            
+        self.__missions= accept.copy()
+        self.__acceptance_mis =  accept.copy()
+        self.compute_original_plan()
+    
+    
     def accept_mission(self, miss, order = None):
         """
         Accepts a mission and optionally assigns an order to it.
@@ -648,10 +790,212 @@ class Vehicle(Observer):
     
     def check_time(self):
         return self.__intime
+
+    def _get_pending_missions(self):
+        pending = []
+        seen = set()
+        for m in self.__ready_mis + self.__missions:
+            mid = m.get_mid()
+            if mid in seen:
+                continue
+            seen.add(mid)
+            pending.append(m)
+        return pending
+
+    def _estimate_route_task_count(self, mission):
+        route = mission.get_best_road()
+        if route is None or len(route) < 2:
+            return 0
+        segments = self.__map.get_segments()
+        n_tasks = 0
+        for idx in range(len(route) - 1):
+            points = (route[idx], route[idx + 1])
+            try:
+                seg_idx = segments.index(points)
+            except ValueError:
+                continue
+            n_tasks += len(segments[seg_idx].get_offloading_tasks())
+        return n_tasks
+
+    def _estimate_mission_time(self, mission):
+        _, distance_to_mission = mission.get_infor_to_mission(self.__cur_pos)
+        t_to_start = distance_to_mission / max(self.__v_nominal, 1e-9)
+
+        route_len = mission.get_long()[0]
+        if route_len <= 0:
+            return t_to_start
+        d_nom = route_len / max(self.__v_nominal, 1e-9)
+        n_tasks = self._estimate_route_task_count(mission)
+        if n_tasks <= 0:
+            return t_to_start + d_nom
+
+        v_eff = mobility_v_eff(
+            d_nom,
+            [self.__avg_task_delay] * n_tasks,
+            self.__v_nominal,
+            self.__rho_down,
+            self.__rho_up,
+        )
+        return t_to_start + route_len / max(v_eff, 1e-9)
+
+    def _build_affected_set(self, violated_mid):
+        pending = self._get_pending_missions()
+        pending_ids = [m.get_mid() for m in pending]
+        if violated_mid not in pending_ids:
+            return set()
+
+        edges = {mid: set() for mid in pending_ids}
+
+        # Queue-order edges.
+        for i in range(len(pending_ids) - 1):
+            edges[pending_ids[i]].add(pending_ids[i + 1])
+
+        # Dependency edges: dep -> mission (mission depends on dep).
+        pending_id_set = set(pending_ids)
+        for m in pending:
+            m_id = m.get_mid()
+            for dep in m.get_depends():
+                if dep in pending_id_set:
+                    edges[dep].add(m_id)
+
+        affected = set()
+        stack = [violated_mid]
+        while stack:
+            cur = stack.pop()
+            if cur in affected:
+                continue
+            affected.add(cur)
+            stack.extend(list(edges.get(cur, [])))
+        return affected
+
+    def _drop_pending_missions(self, mids_to_drop):
+        if not mids_to_drop:
+            return 0
+
+        removed = set()
+
+        def _filter_list(missions):
+            kept = []
+            for mis in missions:
+                if mis.get_mid() in mids_to_drop:
+                    removed.add(mis.get_mid())
+                else:
+                    kept.append(mis)
+            return kept
+
+        self.__ready_mis = _filter_list(self.__ready_mis)
+        self.__missions = _filter_list(self.__missions)
+        self.__acceptance_mis = _filter_list(self.__acceptance_mis)
+        self.__order = [o for o in self.__order if o[0] not in mids_to_drop]
+        self.__late += len(removed)
+        return len(removed)
+
+    def _select_retained_affected_set(self, affected_ids, remain_tau):
+        """Greedy keep-set selection over affected missions under queue/dependency feasibility."""
+        pending = self._get_pending_missions()
+        pending_map = {m.get_mid(): m for m in pending}
+
+        kept = set()
+        used_time = 0.0
+
+        for mis in pending:
+            mid = mis.get_mid()
+            if mid not in affected_ids:
+                continue
+
+            deps = [d for d in mis.get_depends() if d in affected_ids]
+            if any(dep not in kept for dep in deps):
+                continue
+
+            est_time = self._estimate_mission_time(pending_map[mid])
+            if used_time + est_time <= remain_tau + 1e-9:
+                kept.add(mid)
+                used_time += est_time
+
+        return kept
+
+    def _effective_wait_delay(self, exe_delay):
+        """Eq. (12): d_{k,j,v} = min(d^{exe}_{k,j,v}, d^{max}_{k,j})."""
+        return min(float(exe_delay), self.__dmax_wait)
+
+    def _compute_acture_effection_by_delay(self, effective_wait, actual_delay):
+        
+        v_safety = max(0, self.__v_nominal - self.__rho_down * effective_wait)
+        #the time with v_safety = 0
+        time_with_v_safety_0 = max(0, actual_delay - effective_wait) #time with v_safety = 0
+        if time_with_v_safety_0 > 0:
+            v_safety = 0
+        d_up = (self.__v_nominal - v_safety) / self.__rho_up
+        
+        total_effection_time = actual_delay + d_up
+        
+        #total travel distance in total_effection_time by norminal speed
+        total_travel_distance = self.__v_nominal * total_effection_time
+        
+        #effection speed during slow down time
+        if effective_wait <= self.__v_nominal / self.__rho_down:
+            v_eff_down = (self.__v_nominal - 0.5 * self.__rho_down * effective_wait)*(effective_wait/actual_delay)
+        else:
+            v_eff_down = (self.__v_nominal ** 2) / (2 * self.__rho_down * effective_wait)*(effective_wait/actual_delay)
+        
+        v_eff_up = v_safety + 0.5 * self.__rho_up * d_up
+        #actual travel distance in total_effection_time by v_safety
+        actual_travel_distance = v_eff_up*d_up + v_eff_down*effective_wait
+        
+        #gap between total travel distance and actual travel distance
+        gap_distance = total_travel_distance - actual_travel_distance
+        if gap_distance <= 0:
+            raise ValueError(f"The gap distance is negative, something is wrong with the calculation, gap_distance: {gap_distance}, actual_travel_distance: {actual_travel_distance}, total_travel_distance: {total_travel_distance}, effective_wait: {effective_wait}, actual_delay: {actual_delay}, v_safety: {v_safety}")
+        
+        affection_delay = gap_distance / self.__v_nominal
+        
+        return affection_delay
+    
+    def _apply_early_stopping_policy(self):
+        """Proposed 1: selective keep/remove over the affected set when delay propagates."""
+        if not self.__apply_early_stopping:
+            return 0
+
+        dropped_total = 0
+        while len(self.__ready_mis) > 0:
+            candidate = self.__ready_mis[0]
+            remain_tau = max(0.0, self.__tau - self.__ctrl_time)
+            est_time = self._estimate_mission_time(candidate)
+            if est_time <= remain_tau + 1e-9:
+                break
+
+            affected = self._build_affected_set(candidate.get_mid())
+            if not affected:
+                affected = {candidate.get_mid()}
+
+            retained = self._select_retained_affected_set(affected, remain_tau)
+            to_drop = affected - retained
+            if not to_drop:
+                break
+
+            dropped = self._drop_pending_missions(to_drop)
+            dropped_total += dropped
+
+            if self.verbose:
+                print(f"Vehicle {self.__vid} early-stop pruned {dropped} missions "
+                    f"(affected={len(affected)}, retained={len(retained)})")
+
+            self.verify_ready()
+            if remain_tau <= 0:
+                break
+
+        return dropped_total
     
     def handle_offloading_with_vehicles_speed(self, offload_task, current_line_of_road, aver_speed, cur_point, trajectory):
         pass
     
+    def recompute_task_inter_arrival_rate(self, run_time, n_tasks):
+        if run_time <= 0 or n_tasks <= 0:
+            return float("inf")
+        return n_tasks / run_time
+
+    def update_profit_by_mission_id(self, mission_id, total_length, B_remain):
+        self.__profit_by_missions_id[mission_id] = total_length*0.025 + B_remain 
     
     def process_mission(self, missions = None):
         #process priority is the shortest mission first
@@ -661,11 +1005,17 @@ class Vehicle(Observer):
             return
         elif self.__intime == False:
             return
+
+        if self.__apply_early_stopping:
+            self._apply_early_stopping_policy()
+            if len(self.__ready_mis) == 0:
+                return
         # sorted(self.__ready_mis) #sort các nhiệm vụ theo quãng đường thực hiện
         
         cur_mis = self.__ready_mis.pop(0)
         
-        
+        if not self.set_plan_by_step(mission=cur_mis):
+            return
         if len(cur_mis.get_depends())!=0:
             raise ValueError("The mission is not ready to compute ...")
         
@@ -678,6 +1028,10 @@ class Vehicle(Observer):
         veh_position = self.__cur_pos
         best_trajectrory_to_mission, distance_to_mission = cur_mis.get_infor_to_mission(veh_position)
 
+        original_plan = cur_mis.get_original_plan()
+        
+        processing_time_allow = (original_plan[1] - original_plan[0])*1.2 # because of offloading, the allow time higher than 1.2 time compare to expected time
+        
         '''
         khi có các nhiệm vụ trên cùng 1 cung đường,
         chúng ta chỉ cần lấy cung đường dài nhất.
@@ -687,27 +1041,13 @@ class Vehicle(Observer):
         max_point = -float('inf')
         prof = cur_mis.get_profit()
         
-        end_points= [cur_mis.get_best_road()[-1]] #count the mission finished or not
-        same_roads = [cur_mis]
+        endpoint_to_missions = {cur_mis.get_best_road()[-1]: [cur_mis]}
         
         total_length = cur_mis.get_long()[0]
-        for mis in self.__ready_mis:
-            if mis != cur_mis:
-                if cur_mis.in_other_road(mis):
-                    if max_point < len(mis.get_best_road()):
-                        same_longest_road_mis = mis
-                        max_point = len(mis.get_best_road())
-                    prof += mis.get_profit()
-                    self.__ready_mis.remove(mis)
-                    end_points.append(mis.get_best_road()[-1])
-                    same_roads.append(mis)
-                    total_length += mis.get_long()[0]
-        same_longest_road_mis.set_profit(prof)
-        trajectory = same_longest_road_mis.get_best_road()
-
+        trajectory = same_longest_road_mis.get_best_road() 
         segments = self.__map.get_segments()
- 
         completed_cnt = 0
+        n_remove_depends = 0
         total_delay = distance_to_mission / self.__v_nominal  # Eq. (21): travel time to mission start
         if len(best_trajectrory_to_mission)>0:
             best_trajectrory_to_mission.remove(best_trajectrory_to_mission[-1]) #loaị bỏ điểm cuối cùng là điểm bắt đầu nhiệm vụ
@@ -728,9 +1068,31 @@ class Vehicle(Observer):
             d_nom_seg = current_road_long / aver_speed if aver_speed > 0 else 0.0 # second
 
             cur_offloading_delay = 0
+            max_avg_delay_seg = float("inf")
+            if self.__apply_offloading_delay_threshold and len(offload_task) > 0:
+                remain_tau_seg = max(0.0, self.__tau - (self.__ctrl_time + total_delay))
+                max_avg_delay_seg = max_allowable_average_delay(
+                    road_length=current_road_long,
+                    tau_budget=remain_tau_seg,
+                    v_nom=aver_speed,
+                    rho_down=self.__rho_down,
+                    rho_up=self.__rho_up,
+                    n_tasks=len(offload_task),
+                )
             # Collect per-task effective waiting delays for the parallel mobility model
             task_delays_seg = []
-            print(f"Vehicle {self.__vid} processing segment {cur_point} -> {trajectory[0]} with {len(offload_task)} offloading tasks, segment length {current_road_long:.2f}m, nominal time {d_nom_seg:.2f}s")
+            if self.verbose:
+                print(
+                    f"Vehicle {self.__vid} processing segment {cur_point} -> {trajectory[0]} "
+                    f"with {len(offload_task)} offloading tasks, segment length "
+                    f"{current_road_long:.2f}m, nominal time {d_nom_seg:.2f}s"
+                )
+            
+            inter_arrival_time = self.recompute_task_inter_arrival_rate(
+                run_time=current_road_long / aver_speed,
+                n_tasks=len(offload_task),
+            )
+            
             for offt in offload_task:
                 '''
                 Trong thực tế chúng ta sẽ không biết đc khoảng thời gian giữa hai lần offloading.
@@ -755,57 +1117,72 @@ class Vehicle(Observer):
                     new_x = current_pointxy[0] + increase*(l/(sqrt(l/(1+slope**2))))
                     new_y = current_line_of_road.calculate_point(new_x)
                     new_points = Point(x = new_x, y=new_y)
-                    
+                
+                #approximation arrival time
+                arrival_time = self.__ctrl_time + inter_arrival_time
                 # rate, cpu_freq, and the shared ComputeNode for this MEC server
                 rate, cpu_freq, compute_node = get_rate_and_mec_cpu(new_points, self.__mec)
                 task_ifor = offt.get_task()
                 # Uplink transmission delay: Eq. (7)  d^com = alpha_{k,j} / R_{v,e}
                 communtion_delay = task_ifor[0] * 8000 / rate
-                # Queueing delay: Eq. (9)  d^queue = E[D^queue | |q^cmp_x|]
-                # task_arrive() snapshots the current queue length THEN increments it,
-                # so this task "sees" all tasks that arrived before it.
-                d_queue = compute_node.task_arrive()
-                # Total computation delay: Eq. (8)  d^cmp = d^queue + beta_{k,j} / F_x
-                computing_delay = d_queue + task_ifor[1] / cpu_freq
-                                
-                if self.verbose:
-                    print(rate, cpu_freq, communtion_delay, computing_delay, f"(d_queue={d_queue:.4f}, q_size={compute_node.queue_size})")
-                same_longest_road_mis.update_profit(-task_cfg['cost_coefi'])
+                d_queue_peek = compute_node.get_queue_delay()
+                remote_delay = communtion_delay + d_queue_peek + task_ifor[1] / cpu_freq
 
-                exe_delay = communtion_delay + computing_delay
-                # Effective waiting time: Eq. (12)  d_{k,j} = min(exe_delay, d^max_{k,j})
-                # (d^max is assumed non-binding per segment; user can add d_max enforcement)
-                task_delays_seg.append(exe_delay)
-                cur_offloading_delay = exe_delay
-                # Task finishes processing after exe_delay; decrement the MEC queue.
-                # In sequential simulation this means the task departs before the next
-                # task on this segment arrives (no overlap within one vehicle).
-                # With shared ComputeNode across vehicles, cross-vehicle contention is
-                # captured automatically via the thread-safe counter.
-                compute_node.task_depart()
+                local_delay = task_ifor[1] / max(self.__cpu_freqz, 1e-9)
+                exe_delay = remote_delay
+                use_remote = True
+                if self.__apply_offloading_delay_threshold:
+                    selected_delay, use_remote = choose_delay_with_threshold(
+                        remote_delay=remote_delay,
+                        max_avg_delay=max_avg_delay_seg,
+                        local_delay=local_delay,
+                    )
+                    exe_delay = selected_delay
+                if use_remote:
+                    d_queue = compute_node.task_arrive()
+                    computing_delay = d_queue + task_ifor[1] / cpu_freq
+                    exe_delay = communtion_delay + computing_delay
+                    compute_node.task_depart()
+                    same_longest_road_mis.update_profit(-task_cfg['cost_coefi'])
 
-            # Parallel mobility-computation model (Eqs. 19–21):
-            # v^eff = S_{k,v} / d_nom  (Eq. 20), then t = road / v^eff  (Eq. 21).
-            v_eff_seg = mobility_v_eff(
-                d_nom_seg, task_delays_seg, aver_speed,
-                self.__rho_down, self.__rho_up
-            )
+                    if self.verbose:
+                        print(
+                            f"remote delay={exe_delay:.4f}s "
+                            f"(rate={rate:.2f}, cpu={cpu_freq:.2f}, q={compute_node.queue_size})"
+                        )
+                elif self.verbose:
+                    print(
+                        f"switch to local compute delay={exe_delay:.4f}s "
+                        f"(remote={remote_delay:.4f}s, local={local_delay:.4f}s, "
+                        f"threshold={max_avg_delay_seg:.4f}s)"
+                    )
+
+                effective_wait = min(exe_delay, offt.get_task()[3])
+                task_delays_seg.append(effective_wait)
+                affection_delay = self._compute_acture_effection_by_delay(
+                    effective_wait=effective_wait,
+                    actual_delay=exe_delay)
+                cur_offloading_delay += affection_delay
+                
+            seg_time = current_road_long / self.__v_nominal
+            total_delay += (seg_time + cur_offloading_delay)
+            arrived_point = trajectory[0]
+            if processing_time_allow < total_delay and self.__apply_early_stopping:
+                #call early stopping policy to remove some mission
+                self._apply_early_stopping_policy()
             
-            seg_time = current_road_long / v_eff_seg if v_eff_seg > 0 else d_nom_seg
-            total_delay += seg_time
-            
-            while cur_point in end_points:
-                end_points.remove(cur_point)
+            while arrived_point in endpoint_to_missions and len(endpoint_to_missions[arrived_point]) > 0:
                 if self.__ctrl_time + total_delay< self.__tau:
                     completed_cnt += 1
                 else:
                     break
-                idx = same_roads.index(cur_point)
-                mis = same_roads[idx]
+                mis = endpoint_to_missions[arrived_point].pop(0)
                 if mis in self.__missions:
                     self.__missions.remove(mis)
                 if mis in self.__ready_mis:
                     self.__ready_mis.remove(mis)
+                if mis in self.__acceptance_mis:
+                    self.__acceptance_mis.remove(mis)
                 n_remove_depends = mis.update_status(2, missions, time = self.__ctrl_time+total_delay)
                 self.set_pos(mis.get_desti())
                 if self.verbose:
@@ -813,18 +1190,18 @@ class Vehicle(Observer):
                     
         self.__ctrl_time += total_delay
     
-        while trajectory[0] in end_points:
-            end_points.remove(trajectory[0])
+        while len(trajectory) > 0 and trajectory[0] in endpoint_to_missions and len(endpoint_to_missions[trajectory[0]]) > 0:
             if self.__ctrl_time < self.__tau:
                 completed_cnt += 1
             else:
                 break
-            idx = same_roads.index(trajectory[0])
-            mis = same_roads[idx]
+            mis = endpoint_to_missions[trajectory[0]].pop(0)
             if mis in self.__missions:
                 self.__missions.remove(mis)
             if mis in self.__ready_mis:
                 self.__ready_mis.remove(mis)
+            if mis in self.__acceptance_mis:
+                self.__acceptance_mis.remove(mis)
             n_remove_depends = mis.update_status(2, missions, time = self.__ctrl_time)
             if self.verbose:
                 print("Nhiệm vụ {} hoàn thành tính toán".format(mis.get_mid()))
@@ -841,21 +1218,23 @@ class Vehicle(Observer):
         #nếu end_points >0 nghĩa là có 1 vài nhiệm vụ chưa hoàn thành,
         #việc của chúng ta là trace và giảm total profit đi
         total_mis_prof = 0
-        while len(end_points) > 0:
-            p = end_points.pop(0)
-            idx = self.__acceptance_mis.index(p)
-            total_mis_prof += self.__acceptance_mis[idx].get_profit()
+        remaining_missions = []
+        for v in endpoint_to_missions.values():
+            remaining_missions.extend(v)
+        for mis in remaining_missions:
+            total_mis_prof += mis.get_profit()
             self.__late += 1
             
         B_remain = same_longest_road_mis.get_profit()-total_mis_prof
         if (B_remain<=0):
             B_remain = 0
         
-        profit = total_length*0.025 + B_remain 
+        profit = total_length*0.025 + B_remain
         self.__profit += B_remain
         self.__n_completes += completed_cnt
                 
         self.__vehicle_prof += total_length*0.025 + B_remain 
+        self.update_profit_by_mission_id(same_longest_road_mis.get_mid(), total_length, B_remain)
                 
         if self.__ctrl_time > self.__tau:
             self.__missions += self.__ready_mis
@@ -867,10 +1246,14 @@ class Vehicle(Observer):
                 print("Het thoi gian thuc hien nhiem vu")
         return self.__vid, cur_mis.get_mid(), n_remove_depends, len(self.__missions), profit
 
+    def get_profit_by_forall_missions(self):
+        return self.__profit_by_missions_id
+    
     def clear_total_reward(self):
         self.__vehicle_prof = 0
         self.__n_completes = 0
         self.__profit = 0
+        self.__profit_by_missions_id = {}
     
     def get_profits(self, mission):
         profit = 0
@@ -878,7 +1261,7 @@ class Vehicle(Observer):
             for mis in mission:
                 profit += mis.get_profit()
         elif isinstance(mission, Mission):
-            profit += mis.get_profit()
+            profit += mission.get_profit()
         return profit
 
     def get_accepted_missions(self):
@@ -895,10 +1278,11 @@ class Vehicle(Observer):
 
 class Task:
     id = 0
-    def __init__(self, datasize, compsize, id = None):
+    def __init__(self, datasize, compsize, id = None, max_delay = None):
         self.__ds = datasize
         self.__cs = compsize
         self.__id = Task.id
+        self.__max_delay = max_delay
         if id!=None:
             self.__id = id
         Task.id += 1
@@ -910,7 +1294,7 @@ class Task:
         return self.__cs 
 
     def get_task(self):
-        return (self.__ds, self.__cs, self.__id)
+        return (self.__ds, self.__cs, self.__id, self.__max_delay)
     
     def __lt__(self, other):
         return self.__ds < other.__ds and self.__cs < other.__cs
@@ -985,10 +1369,12 @@ class TaskGenerator:
             filld['seg_longs'] = longs
             filld['seg_real_speed'] = (speed/((sta_seg+1)*0.2))
             filld['seg_max_numtask'] = numtasks
+            vehicles_cpu_capcity = vehicle_cfg['cpu_freqz']
             for t in range(numtasks):
                 datasize = self.generator.integers(self.__mindatasize, self.__maxdatasize)
                 compsize = self.generator.integers(self.__mincompsize, self.__maxcompsize)
-                task = Task(datasize=datasize, compsize=compsize)
+                deadline = compsize/vehicles_cpu_capcity*np.random.uniform(0.8, 1.2) #second
+                task = Task(datasize=datasize, compsize=compsize, max_delay=deadline)
                 tasks[t] = task
             filld['seg_tasksl'] = tasks
             json_object = json.dumps(filld, indent=5, cls=NpEncoder)
