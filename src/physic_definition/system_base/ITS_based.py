@@ -358,6 +358,7 @@ class Mission(Subject):
     def add_original_plan(self, plan):
         self.__original_plan = plan
         return True
+
     
     def get_original_plan(self):
         return self.__original_plan
@@ -564,15 +565,32 @@ class Vehicle(Observer):
     
     def compute_original_plan(self):
         start_time = 0
-        end_time = 0        
+        end_time = 0
+        execuse_time = {} #missions id, time     
         for mis in self.__missions[:]:
             start_time = end_time
             end_time += mis.get_long()[0]/self.__v_nominal
             if end_time <= self.__tau:
                 mis.add_original_plan((start_time, end_time))
+                execuse_time[mis.get_mid()] = end_time - start_time
             else:
                 self.__missions.remove(mis)
 
+        #compute susplus time:
+        if end_time < self.__tau:
+            susplus_time = self.__tau - end_time
+        #compute rate time
+        rate = np.array(list(execuse_time.values()))/np.sum(list(execuse_time.values()))
+        end_time = 0
+        for idx, mis in enumerate(self.__missions):
+            current_plan_start, current_plant_end = mis.get_original_plan()
+            gap = rate[idx]*susplus_time
+            start_new = end_time
+            previous_gap = current_plant_end - current_plan_start
+            
+            end_time = start_new + previous_gap + gap
+            mis.add_original_plan((start_new, end_time))
+        
     def set_plan_by_step(self, mission):
         start_time = self.__ctrl_time
         end_time = start_time + mission.get_long()[0]/self.__v_nominal
@@ -594,7 +612,7 @@ class Vehicle(Observer):
     def reset(self):
         Vehicle.id = 0
     
-    def set_mission(self, sol, missions=[], mtuple = False):
+    def set_mission(self, sol, missions=[], mtuple = False, auto_move_to_ready = True):
         """
         Sets the mission for the vehicle based on the provided solution and missions.
         Parameters:
@@ -627,7 +645,7 @@ class Vehicle(Observer):
                         self.__missions.remove(mis)
                     else:
                         self.verify_ready()
-        elif isinstance(sol, int) or isinstance(sol, np.int64):
+        elif (isinstance(sol, int) or isinstance(sol, np.int64)) and auto_move_to_ready:
             i = missions.index(sol) #index of mission
             mis = missions[i]
             if len(mis.get_depends()) == 0:
@@ -641,6 +659,18 @@ class Vehicle(Observer):
             if len(self.__ready_mis) == 0:
                 return False
             return True
+        
+        elif (isinstance(sol, int) or isinstance(sol, np.int64)) and not auto_move_to_ready:
+            #set mission by id and not automatic move mission to ready mission queue
+            i = missions.index(sol) #index of mission
+            mis = missions[i]
+            if len(mis.get_depends()) == 0:
+                mis.update_status(1)
+            self.accept_mission(miss=mis)
+            if len(self.__ready_mis) == 0:
+                return False
+            return True
+        
         elif (isinstance(sol, list) or isinstance(sol, np.ndarray)) and mtuple:
             completed_set = []
             for idx, val in enumerate(sol):
@@ -786,7 +816,7 @@ class Vehicle(Observer):
             
     
     def inprocess(self):
-        return len(self.__ready_mis)>0    
+        return len(self.__ready_mis)>0  and self.__intime
     
     def check_time(self):
         return self.__intime
@@ -948,7 +978,6 @@ class Vehicle(Observer):
             raise ValueError(f"The gap distance is negative, something is wrong with the calculation, gap_distance: {gap_distance}, actual_travel_distance: {actual_travel_distance}, total_travel_distance: {total_travel_distance}, effective_wait: {effective_wait}, actual_delay: {actual_delay}, v_safety: {v_safety}")
         
         affection_delay = gap_distance / self.__v_nominal
-        
         return affection_delay
     
     def _apply_early_stopping_policy(self):
@@ -1159,9 +1188,12 @@ class Vehicle(Observer):
 
                 effective_wait = min(exe_delay, offt.get_task()[3])
                 task_delays_seg.append(effective_wait)
+                # print(f"computing_delay = {computing_delay:.4f}s, communtion_delay={communtion_delay:.4f}s, local_delay={local_delay:.4f}s")
+                # print(f"effective_wait={effective_wait:.4f}s, actual_delay={exe_delay:.4f}s, d_queue={d_queue_peek:.4f}s, rate={rate:.2f}bps, cpu_freq={cpu_freq:.2f}Hz, queue_size={compute_node.queue_size}")
                 affection_delay = self._compute_acture_effection_by_delay(
                     effective_wait=effective_wait,
                     actual_delay=exe_delay)
+                
                 cur_offloading_delay += affection_delay
                 
             seg_time = current_road_long / self.__v_nominal
@@ -1363,6 +1395,7 @@ class TaskGenerator:
             lam, speed = seg.get_infor()
             runtime = longs/(speed/((sta_seg+1)*0.2))
             numtasks = int(lam*runtime)
+            print("segment {} with state {} have {} offloading tasks, lamda {}".format(seg.get_sid(), sta_seg, numtasks, lam))
             tasks = {}
             filld['seg_id'] = seg.get_sid()
             filld['seg_status'] = sta_seg

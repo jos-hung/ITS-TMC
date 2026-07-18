@@ -239,7 +239,6 @@ class RLTrainer:
         Returns:
             0 on successful completion.
         """
-        change = [0]*len(modify_reward['state'])
         cnt_completed = 0
         
         agent_type = type(self.agents[0]).__name__
@@ -280,8 +279,7 @@ class RLTrainer:
                             (mission_cfg['n_miss_per_vec'] - aidx) * n_remove_depends * dep_scale - n_waiting * wait_scale
                         ) + cnt_completed * mission_cfg['n_mission'] * completed_scale
                         modify_reward['current_wards'][aidx][vehicle_id][0] = profit + add_reward
-                        break
-                change[idx] = True
+                        # break
 
         # Cooperative fairness shaping: blend with team reward and
         # softly penalize large deviation from the team mean.
@@ -301,29 +299,20 @@ class RLTrainer:
         for idx, state in enumerate(modify_reward['state']):
             for sidx, vehicle in enumerate(state):
                     action_idx = modify_reward['action_indices'][idx][sidx] if sidx < len(modify_reward['action_indices'][idx]) else -1
-                    if change[idx] == True and action_idx != -1:
-                        
+                    if action_idx != -1:
+                        # Always keep the reward from env/shaping pipeline;
+                        # avoid forcing a hard penalty for steps without completion info.
+                        reward_value = modify_reward['current_wards'][idx][sidx]
                         self.agents[sidx].add_global_memory(state[vehicle], 
                                             action_idx,
-                                            modify_reward['current_wards'][idx][sidx], 
+                                            reward_value, 
                                             modify_reward['next_state'][idx][vehicle],
                                             modify_reward['dones'][idx][sidx])
                         self.agents[sidx].add_memory(state[vehicle], 
                                             action_idx,
-                                            modify_reward['current_wards'][idx][sidx], 
+                                            reward_value, 
                                             modify_reward['next_state'][idx][vehicle],
                                             modify_reward['dones'][idx][sidx])
-                    elif action_idx != -1:
-                        self.agents[sidx].add_memory(state[vehicle], 
-                                                action_idx,
-                                                [-100], 
-                                                modify_reward['next_state'][idx][vehicle],
-                                                modify_reward['dones'][idx][sidx])
-                        self.agents[sidx].add_global_memory(state[vehicle], 
-                                                action_idx,
-                                                [-100], 
-                                                modify_reward['next_state'][idx][vehicle],
-                                                modify_reward['dones'][idx][sidx])
                         
         return 0
     
@@ -406,25 +395,20 @@ class RLTrainer:
             # Initiate learning for agent if update frequency is observed.
             if self.agents[0].train_start < self.timestep and self.timestep >self.start_train and self.timestep%self.env.data['n_miss_per_vec']==0:
                 threads = []
-                count_update_head_agent = int(self.timestep%len(self.agents))
                 for idx, agent in enumerate(self.agents):
-                    head_update = False
-                    if idx == count_update_head_agent and np.random.rand() > 0.99:
-                        head_update = True
-                        
                     if self.thread == False:
-                        agent.train_model(head_update)
+                        agent.train_model()
                     else:
-                        update_thread = threading.Thread(target=agent.train_model, args=(head_update,))
+                        update_thread = threading.Thread(target=agent.train_model)
                         if self.detach_thread:
                             update_thread.daemon = True
-                            # print("training via a detach thread: {}".format(idx))
                             update_thread.start()
-                            pass
                         else:
                             update_thread.start()
                             threads.append(update_thread)
-                            pass
+                if self.detach_thread==False:
+                    for idx, thread in enumerate(threads):
+                        thread.join()
             if self.timestep > 0 and self.timestep%1000==0:
                 for idx, agent in enumerate(self.agents):
                     if hasattr(agent, 'update_target_model'):
@@ -442,37 +426,40 @@ class RLTrainer:
     def run_episode_modify_reward_for_robots(self):
         """
         Runs a single episode with reward modification enabled.
-        
-        This method collects all episode data and applies reward shaping
-        at the end of the episode based on task completion metrics.
+
+        This variant first collects mission selections for all robots,
+        then executes the environment once in action-list mode.
 
         Returns:
             scores: List of rewards gained at each timestep.
         """      
         # Initialize list to hold reward values at each timestep.
-        scores = []
-        actions = []
-        for i in range(self.env.data['n_vehicles']):
-            scores.append([])
-            actions.append([])
+        n_vehicles = self.env.data['n_vehicles']
+        n_miss_per_vec = self.env.data['n_miss_per_vec']
+        scores = [[] for _ in range(n_vehicles)]
+        actions = [[] for _ in range(n_vehicles)]
 
         # Restart the environment and gather original states.
         env_info = self.env.reset()
         states = env_info[0]
 
         # Act and evaluate results and networks for each timestep.
-        actionssss = []
         modify_reward = {"step": [], 'state': [], 'action':[], 'action_indices': [], 'current_wards':[], 'next_state':[], 'modified_infor':[], 'dones': []}
-        for t in range(self.env.data['n_miss_per_vec']):
+        for t in range(n_miss_per_vec):
             self.timestep += 1
+            base_penalty = ddqn_cfg['conflict_penalty_scale'] * avg_reward
             # Sample actions for each agent while keeping track of states,
             # actions and log probabilities.
-            processed_states, actions_save, log_probs = [], [], []
-            action_indices_step = []
+            processed_states, log_probs = [], []
+            action_indices_step = [-1] * n_vehicles
+            action_step = [-1] * n_vehicles
+            selected_actions_this_step = []
             modify_reward['state'].append(states)
             modify_reward['step'].append(t)
             
             for idx, state in enumerate(states):
+                
+                penalty= 0
                 
                 agent = self.agents[idx]
                 observationip = np.reshape(states[state], (1, -1))
@@ -505,23 +492,41 @@ class RLTrainer:
                     raise ValueError(f"Unsupported agent type: {agent_type}")
 
                 if any(torch.equal(processed_state, item) for item in processed_states) \
-                    and action_idx in actionssss:
-                    continue
-                if self.env.action_memory[action_idx] == 1:
-                    scores[idx].append(-0.01*avg_reward)
-                    # modify_reward['action'].append([-1])
-                    actionssss.append(-1)
-                    continue
-                actionssss.append(action_idx)
+                    and action_idx in selected_actions_this_step:
+                    # available = self.env.count_available_actions()
+                    # min_available = max(1, int(ddqn_cfg['conflict_min_available']))
+                    # if ddqn_cfg['conflict_opportunity_aware']:
+                    #     penalty = -base_penalty / max(min_available, available)
+                    # else:
+                    #     penalty = -base_penalty
+                    # scores[idx].append(penalty)
+                    raise ValueError(f"Conflict detected: Agent {idx} selected action {action_idx} which is already selected by another agent in this timestep.")
+                if self.env.is_action_selected(action_idx):
+                    available = self.env.count_available_actions()
+                    candidate_actions = [
+                        mission_id for mission_id in range(self.env.data['n_missions'])
+                        if not self.env.is_action_selected(mission_id)
+                    ]
+                    penalty = -base_penalty
+                    
+                    self.agents[idx].add_memory(processed_state, action_idx, [penalty], processed_state, 0)
+                    #random provide a new action from the available actions
+                    action_idx = int(np.random.choice(candidate_actions))
+                    # scores[idx].append(penalty)
+                    # scores[idx].append(penalty)
+                    print(penalty, "penalty for conflict action selection")
+                    #add this transition to the memory with the penalty reward
+                selected_actions_this_step.append(action_idx)
                 processed_states.append(processed_state)
                 actions[idx].append(action_idx)
-                actions_save.append(action[1])
-                action_indices_step.append(action_idx)
-                self.env.update_action(action_idx)
+                action_indices_step[idx] = action_idx
+                action_step[idx] = action_idx
+                self.env.update_action(action_idx, idx)
                 scores[idx].append(0)
-                # modify_reward['action'].append([action_idx])
-                modify_reward['action_indices'].append(action_indices_step)
-            modify_reward['action'].append(actionssss)  
+                
+                
+            modify_reward['action_indices'].append(action_indices_step)
+            modify_reward['action'].append(action_step)
             
                 
             states = self.env.get_observations()
@@ -531,23 +536,36 @@ class RLTrainer:
         next_states, rewards, dones, truncated, done_process_infor, action_dict = self.step_env(actions, states, action_list = True)
         dones = [dones]*len(states)
         print(rewards)
-        for idx_ in range(self.env.data['n_miss_per_vec']):
-            temp_reward =   {}
+        # Map completion info to the corresponding selection timestep so
+        # do_modify_reward can update memory consistently.
+        modified_infor_steps = [[] for _ in range(n_miss_per_vec)]
+        for data in done_process_infor:
+            if data is None:
+                continue
+            vehicle_id, mission_id, *_ = data
+            for step_idx, action_step in enumerate(modify_reward['action']):
+                if vehicle_id < len(action_step) and action_step[vehicle_id] == mission_id:
+                    modified_infor_steps[step_idx].append(data)
+                    break
+
+        # rewards in action_list mode: list[vehicle_id] -> dict[mission_id] = profit
+        for idx_ in range(n_miss_per_vec):
+            temp_reward = {}
             for agent_idx in range(len(self.agents)):
-                if scores[agent_idx][idx_] >= 0:
-                    mission_id = actions[agent_idx].pop(0)
-                    try:            
-                        temp_reward[agent_idx] = [rewards[agent_idx][mission_id]]
-                        scores[agent_idx][idx_] += rewards[agent_idx][mission_id]
-                    except:
-                        temp_reward[agent_idx] = [scores[agent_idx][idx_]]
-                else:
-                    temp_reward[agent_idx] = [scores[agent_idx][idx_]]
+                step_reward = scores[agent_idx][idx_]
+                mission_id = modify_reward['action'][idx_][agent_idx]
+
+                if mission_id != -1 and agent_idx < len(rewards):
+                    vehicle_reward_map = rewards[agent_idx]
+                    if isinstance(vehicle_reward_map, dict) and mission_id in vehicle_reward_map:
+                        step_reward += vehicle_reward_map[mission_id]
+
+                scores[agent_idx][idx_] = step_reward
+                temp_reward[agent_idx] = [step_reward]
+
             modify_reward['current_wards'].append(temp_reward)
             modify_reward['dones'].append(dones)
-        print(scores)
-        modify_reward['modified_infor'].append(done_process_infor)
-        # modify_reward['dones'].append(dones)
+            modify_reward['modified_infor'].append(modified_infor_steps[idx_])
         # Initiate learning for agent if update frequency is observed.
         
         if self.agents[0].train_start < self.timestep and self.timestep >self.start_train and self.timestep%self.env.data['n_miss_per_vec']==0:
@@ -576,9 +594,6 @@ class RLTrainer:
                 if hasattr(agent, 'update_target_model'):
                     agent.update_target_model()
     
-        # # End episode if desired score is achieved.
-        # if np.any(dones):
-        #     break
         states = next_states
         self.do_modify_reward(modify_reward)
         return scores
@@ -615,7 +630,7 @@ class RLTrainer:
         cnt = 0
         max_free_select = 5
         first_queue_list = []
-        while (self.env.action_memory == 0).any():
+        while self.env.count_available_actions() > 0:
             for idx, state in enumerate(states):
                 
                 cur_idx = idx
@@ -637,12 +652,12 @@ class RLTrainer:
                 tem_memory_action[cur_idx][0].append(processed_state) 
                 tem_memory_action[cur_idx][3].append(processed_state)
                 tem_memory_action[cur_idx][1].append(action)
-                if self.env.action_memory[action]:
+                if self.env.is_action_selected(action):
                     tem_memory_action[cur_idx][2].append(-0.01*avg_reward) 
                     tem_memory_action[cur_idx][4].append(-1)
                     continue
                 
-                self.env.action_memory[action] = 1
+                self.env.mark_action_selected(action, cur_idx)
                 first_queue_action = len(self.env.missions[action].get_depends()) == 0
                 if first_queue_action:
                     first_queue_list.append(action)
@@ -798,46 +813,83 @@ class RLTrainer:
             f'Mean Episode Length {mean_eps_len:.1f}'
         )
 
-    def plot(self):
+    def plot(self, window=500):
         """
-        Plots moving averages of maximum reward and rewards for each agent.
-        Saves the plot and reward data to the save directory.
+        Plots cumulative rewards over a sliding window for each agent.
+
+        Parameters
+        ----------
+        window : int
+            Sliding-window size. Default is 500 episodes.
         """
-        
-        # Initialize DataFrame
+
         columns = [f'Agent {i}' for i in range(len(self.agents))]
-        df = pd.DataFrame(self.score_history, columns=columns)
-        df['Max'] = df.max(axis=1)
 
-        # Setup figure and axis
-        fig, ax = plt.subplots(figsize=(12, 9))
-        ax.set_title('Learning Curve: Multi-Agent RL', fontsize=28)
-        ax.set_xlabel('Episode', fontsize=21)
-        ax.set_ylabel('Score', fontsize=21)
-
-        # Use a colormap that avoids white (tab10 is a good default for up to 10 agents)
-        df.rolling(self.score_window_size).mean().iloc[:, :-1].plot(
-            ax=ax,
-            colormap='tab10',
-            legend=True
+        df = pd.DataFrame(
+            self.score_history,
+            columns=columns
         )
 
-        # Plot max line in red
-        df['Max'].rolling(self.score_window_size).mean().plot(
+        # Reward lớn nhất giữa các agent tại mỗi episode
+        df['Max'] = df[columns].max(axis=1)
+
+        # Tổng reward trong cửa sổ trượt
+        cumulative_rewards = df.rolling(
+            window=window,
+            min_periods=1
+        ).mean()
+
+        fig, ax = plt.subplots(figsize=(12, 9))
+
+        ax.set_title(
+            f'Cumulative Rewards - Sliding Window {window}',
+            fontsize=28
+        )
+        ax.set_xlabel('Episode', fontsize=21)
+        ax.set_ylabel(f'Cumulative Reward ({window} Episodes)', fontsize=21)
+
+        # Các agent
+        cumulative_rewards[columns].plot(
+            ax=ax,
+            colormap='tab10',
+            linewidth=2
+        )
+
+        # Max reward
+        cumulative_rewards['Max'].plot(
             ax=ax,
             color='red',
-            linewidth=2,
+            linewidth=3,
+            linestyle='--',
             label='Max Reward'
         )
 
-        # Grid, legend, and layout
-        ax.grid(color='gray', linewidth=0.2)
+        ax.grid(
+            color='gray',
+            linewidth=0.3,
+            alpha=0.7
+        )
+
         ax.legend(fontsize=13)
         plt.tight_layout()
 
-        # Save plot and data
-        filename = f'scores.png'
-        fig.savefig(os.path.join(self.save_dir, filename))
-        df.to_csv(os.path.join(self.save_dir, "_reward.csv"))
+        os.makedirs(self.save_dir, exist_ok=True)
 
-        plt.close()
+        fig.savefig(
+            os.path.join(
+                self.save_dir,
+                'cumulative_rewards_window_500.png'
+            ),
+            dpi=300,
+            bbox_inches='tight'
+        )
+
+        cumulative_rewards.to_csv(
+            os.path.join(
+                self.save_dir,
+                'cumulative_rewards_window_500.csv'
+            ),
+            index=False
+        )
+
+        plt.close(fig)

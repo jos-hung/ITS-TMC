@@ -43,8 +43,8 @@ class ITSEnv(gym.Env):
         self._agent_ids = set()
         self.action_space = Box(-np.inf, np.inf, shape=(data["n_missions"],), dtype='float32')
         
-        self.observation_space = Box(-np.inf, np.inf, shape=(7068,1), dtype="float32")                    
-        self.action_memory = np.array([0]*data["n_missions"])
+        self.observation_space = Box(-np.inf, np.inf, shape=(2976,1), dtype="float32")                    
+        self.action_memory = np.zeros((data["n_missions"],10))
         self.solution =  ['None']*(mission_cfg['n_vehicle']*mission_cfg['n_miss_per_vec'])
         self.max_selection_turn = [self.data['n_miss_per_vec']]*self.data['n_vehicles']
         self.done = True 
@@ -104,7 +104,7 @@ class ITSEnv(gym.Env):
             self.missions = self.init_missions()
         self._agent_ids = {f"vehicle_{i}" for i in range(self.data["n_vehicles"])}
         # Return initial observations with an empty info dict
-        self.action_memory = np.array([0]*self.data["n_missions"])
+        self.action_memory = np.zeros_like(self.action_memory)
         self.solution =  ['None']*(mission_cfg['n_vehicle']*mission_cfg['n_miss_per_vec'])
         obs = self.get_observations()
         infos = {agent_id: {} for agent_id in self._agent_ids}  
@@ -136,7 +136,7 @@ class ITSEnv(gym.Env):
             self.missions = self.init_missions()
         self._agent_ids = {f"vehicle_{i}" for i in range(self.data["n_vehicles"])}
         # Return initial observations with an empty info dict
-        self.action_memory = np.array([0]*self.data["n_missions"])
+        self.action_memory = np.zeros_like(self.action_memory)
         self.solution =  ['None']*(mission_cfg['n_vehicle']*mission_cfg['n_miss_per_vec'])
         obs = self.get_observations()
         infos = {agent_id: {} for agent_id in self._agent_ids}  
@@ -361,10 +361,55 @@ class ITSEnv(gym.Env):
             # print("vehicle_", i, action_memory)
         return obs
     
-    def update_action(self, action):
+    def is_action_selected(self, action):
+        memory = np.asarray(self.action_memory)
+        action = int(action)
+        if memory.ndim == 1:
+            return bool(memory[action] == 1)
+
+        flag_row = memory[action]
+        return (flag_row == 1).all()
+
+    def mark_action_selected(self, action, vehicle_idx=None):
+        memory = np.asarray(self.action_memory)
+        action = int(action)
+        if memory.ndim == 1:
+            memory[action] = 1
+        else:
+            if memory.shape[0] == 1:
+                memory[0, action] = 1
+            else:
+                # Last row = selected-action flags.
+                if (memory[action,:]==1).all():
+                    self.action_memory = memory
+                    return
+                memory[action, :] = 1
+        self.action_memory = memory
+        # print(self.action_memory)
+    def count_available_actions(self):
+        memory = np.asarray(self.action_memory)
+        if memory.ndim == 1:
+            return int(np.sum(memory == 0))
+
+        if memory.shape[0] == 1:
+            return int(np.sum(memory[0] == 0))
+
+        return int(np.sum(memory[-1] == 0))
+
+    def all_actions_selected(self):
+        memory = np.asarray(self.action_memory)
+        if memory.ndim == 1:
+            return bool((memory == 1).all())
+
+        if memory.shape[0] == 1:
+            return bool(np.all(memory[0] == 1))
+
+        return bool(np.all(memory[-1] == 1))
+
+    def update_action(self, action, vehicle_idx=None):
         if type(action) is not int:
             action = int(np.argmax(action))
-        self.action_memory[action]=1  
+        self.mark_action_selected(action, vehicle_idx)
 
     def update_mem_obs(self, obs, v_id):
         action_memory = np.array(self.action_memory).flatten()
@@ -399,18 +444,19 @@ class ITSEnv(gym.Env):
 
         wrong_action_penalty = {key: 0 for key in range(0, len(self.vehicles))}
         
-        solution = [-1]*self.data['n_missions']
-        for idx, sol in enumerate(actions):
-            for s in sol:
-                solution[s] = idx
-        
-        for idx in range(self.data['n_vehicles']):
-            self.vehicles[idx].set_mission(solution, self.missions)
+        actions_ = copy.deepcopy(actions)
+        for idx, action in enumerate(actions_):
+            num_actions = len(action)
+            while(num_actions > 0):
+                mission_id = action.pop(0)
+                num_actions -= 1
+                self.vehicles[idx].set_mission(mission_id, self.missions, auto_move_to_ready=False) #set mission by id for each vehicles
         
         #clear total_reward for calcule again with new set of mission:
         for v in self.vehicles:
+            v.compute_original_plan()
+            v.verify_ready()
             v.clear_total_reward()
-        #     v.fit_order()
             
         done_process_infors = []
     
@@ -423,10 +469,14 @@ class ITSEnv(gym.Env):
                 if done_process_infor==None:
                     count_done += 1
             for v in self.vehicles:
+                v.verify_ready()
+            for v in self.vehicles:
                 if v.inprocess():
                     terminate = False
+                    break
             if terminate:
                 break
+            print("---step {}---".format(self.current_step))
         total_system_profit = 0
         intime = False        
         all_rewards = []
@@ -438,7 +488,7 @@ class ITSEnv(gym.Env):
             if v.check_time():
                 intime = True
                 
-        terminateds = self.current_step >= self.max_steps or (np.array(self.action_memory) == 1).all() or intime == False
+        terminateds = self.current_step >= self.max_steps or self.all_actions_selected() or intime == False
         truncateds = False  # Assuming no truncation in this example
         if terminateds or (count_done == self.data['n_vehicles']):
             print(self.action_memory)
@@ -471,7 +521,7 @@ class ITSEnv(gym.Env):
             select_order = select_order[offset:] + select_order[:offset]
 
         for idx in select_order:
-            if (self.action_memory == 1).all():
+            if self.all_actions_selected():
                 for v in range(self.data['n_vehicles']):
                     if v not in (list(action_out.keys())):
                         action_out[v] = -1
@@ -500,10 +550,10 @@ class ITSEnv(gym.Env):
             else:
                 print("1 loi da xay ra")
                 exit(1)
-            if self.action_memory[action] == 1 and states!=None:
+            if self.is_action_selected(action) and states!=None:
                 base_penalty = ddqn_cfg['conflict_penalty_scale'] * avg_reward
                 if ddqn_cfg['conflict_opportunity_aware']:
-                    available = int(np.sum(self.action_memory == 0))
+                    available = self.count_available_actions()
                     min_available = max(1, int(ddqn_cfg['conflict_min_available']))
                     penalty = -base_penalty / max(min_available, available)
                 else:
@@ -513,9 +563,9 @@ class ITSEnv(gym.Env):
                 wrong_action_penalty[idx] += penalty
                 action_out[idx] = action
                 continue
-            if self.action_memory[action] == False:
+            if not self.is_action_selected(action):
                 self.vehicles[idx].set_mission(action, self.missions)
-                self.action_memory[action] = 1
+                self.mark_action_selected(action, idx)
                 self.solution[action] = idx
                 self.max_selection_turn[idx] -= 1
             # else:
@@ -557,7 +607,7 @@ class ITSEnv(gym.Env):
             if v.check_time():
                 intime = True
                 
-        terminateds = self.current_step >= self.max_steps or (np.array(self.action_memory) == 1).all() or intime == False
+        terminateds = self.current_step >= self.max_steps or self.all_actions_selected() or intime == False
         truncateds = False  # Assuming no truncation in this example
         if terminateds or (count_done == self.data['n_vehicles']):
             print(self.action_memory)

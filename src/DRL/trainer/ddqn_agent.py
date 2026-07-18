@@ -151,7 +151,8 @@ class DDQNAgent(nn.Module):
         try:
             if self.generator.random() > 1-ddqn_cfg['combine'] and len(self.global_memory) >= self.batch_size:
                 mini_batch = random.sample(self.global_memory, self.batch_size)
-
+            elif len(self.memory) >= self.batch_size:
+                mini_batch = random.sample(self.memory, self.batch_size)
             else:
                 return
                 
@@ -168,8 +169,9 @@ class DDQNAgent(nn.Module):
 
             states = torch.FloatTensor(states).to(device)
             next_states = torch.FloatTensor(next_states).to(device)
-            actions = torch.LongTensor(actions).unsqueeze(1).to(device)  # Tensor 2D
+            actions = torch.LongTensor(actions).unsqueeze(1).to(device)  # Tensor 2D            
             rewards = torch.FloatTensor(rewards).to(device).reshape([self.batch_size])
+            
             dones = torch.FloatTensor(dones).to(device)
             if not head_update and self.has_share_head_net:
                 with torch.no_grad():

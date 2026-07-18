@@ -255,7 +255,8 @@ def ddqn(**kwargs):
     
     hidden_dim = int(state_size*0.5)
     output_dim = int(state_size*0.3)
-    share_head_net = SharedQueueHead(output_dim=output_dim, hidden_dim=hidden_dim, input_dim=state_size).to(device)
+    # share_head_net = SharedQueueHead(output_dim=output_dim, hidden_dim=hidden_dim, input_dim=state_size).to(device)
+    share_head_net = None
     agents = [
         create_agent(
             state_size,

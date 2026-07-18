@@ -23,12 +23,12 @@ else:
     device = torch.device('cpu')
 
 def create_agent(state_size, action_size, actor_fc1_units=64,
-                 actor_fc2_units=32, actor_lr=1e-3, critic_fc1_units=32,
-                 critic_fc2_units=32, critic_lr=3e-3, gamma=0.99,
-                 num_updates=100, max_eps_length=500, eps_clip=0.3,
-                 critic_loss=0.5, entropy_bonus=0.01, batch_size=256, 
-                 agent_idx=0, load_from_file=False, ckpt_idx = 0, 
-                 ppo=False):
+                actor_fc2_units=32, actor_lr=1e-3, critic_fc1_units=32,
+                critic_fc2_units=32, critic_lr=3e-3, gamma=0.99,
+                num_updates=100, max_eps_length=500, eps_clip=0.3,
+                critic_loss=0.5, entropy_bonus=0.01, batch_size=256, 
+                agent_idx=0, load_from_file=False, ckpt_idx = 0, 
+                ppo=False):
 
     """
     This function creates an agent with specified parameters for training.
