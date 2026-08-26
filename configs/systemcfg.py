@@ -10,17 +10,21 @@ Modules that need runtime constants import values from here. Changing values
 will affect runs globally.
 """
 
-DEVICE = 0
+DEVICE =  0
 GLOBAL_SEED = 42
 
 log_configs = {
     'log_dir': 'logs'
 }
 
+
 apply_thread = 0
+
+dependence_rate = 0.1
+
 apply_detach = 0
 score_window_size = 100
-tau = 120
+tau = 60
 mission_cfg = {
     'n_mission': 25,
     'benifits': [50,100],
@@ -29,8 +33,9 @@ mission_cfg = {
 }
 
 apply_early_stopping = False #proposed 1 trong paper
-apply_offloading_based_max_allow_average_delay = True #proposed 2 trong paper
-apply_robots_training = True 
+apply_offloading_based_max_allow_average_delay = False #proposed 2 trong paper
+apply_robots_training = True
+
 
 ppo_cfg = {
     'benifits': [50,100],
@@ -43,7 +48,7 @@ ppo_cfg = {
     'type_': 'MAPPOTrainer',
     'discount_factor': 0.99,
     'learning_rate': 3e-4,
-    'batch_size': 128,
+    'batch_size': 512,
     'maxlen_mem': 200000,
     'eps_clip': 0.2,
     'entropy_coef': 0.01,
@@ -64,7 +69,7 @@ ppo_cfg = {
 a2c_cfg = {
     'discount_factor': 0.99,
     'learning_rate': 3e-4,
-    'batch_size': 256,
+    'batch_size': 512,
     'maxlen_mem': 200000,
     'entropy_coef': 0.01,
     'value_coef': 0.5,
@@ -86,7 +91,7 @@ ddpg_cfg = {
     'critic_lr': 1e-3,
     'tau': 0.005,
     'noise_std': 0.1,
-    'batch_size': 256,
+    'batch_size': 512,
     'maxlen_mem': 200000,
     'combine': 0.0,
     'modify_reward': True,
@@ -129,10 +134,10 @@ map_cfg = {
     'radius': 2500,
     'n_lines': 15,
     'busy': 1,
-    'fromfile': 1
+    'fromfile': 1,
 }
 network_cfg = {
-    "n_MEC":20,
+    "n_MEC":5,
     "CPU_freq": [100, 300],#mcycles
     "CPU_satelite": 50, #mcycles
     "satelite_distance": 1000, #km
@@ -143,9 +148,9 @@ network_cfg = {
 }
 vehicle_cfg = {
     # Per-robot mobility parameters (Paper Section II, Eqs. 13-20)
-    'v_nominal': 10.0,   # nominal traveling speed v^0_v (m/s)
+    'v_nominal': 20.0,   # nominal traveling speed v^0_v (m/s)
     'v_min': 0.0,        # minimum safe speed v^min_v (m/s)
-    'rho_down': 2.0,     # safe deceleration rate rho^down_v (m/s^2)
+    'rho_down': 4.0,     # safe deceleration rate rho^down_v (m/s^2)
     'rho_up': 2.0,       # acceleration rate rho^up_v (m/s^2)
     'cpu_freqz': 10.0, # CPU capacity f^max_v (mcycles/s)
 }
@@ -155,8 +160,8 @@ ddqn_cfg = {
     "discount_factor":0.95,
     "learning_rate": 1e-5,
     "epsilon": 1.0,
-    "epsilon_decay": 0.999,
-    "epsilon_min": 0.1,
+    "epsilon_decay": 0.99,
+    "epsilon_min": 0.05,
     "batch_size": 512,
     "maxlen_mem": 10000000,
     "modify_reward": True,
@@ -172,5 +177,5 @@ ddqn_cfg = {
     "team_reward_alpha_start": 0.05,
     "team_reward_alpha_end": 0.15,
     "team_reward_alpha_warmup_episodes": 30000,
-    "fairness_gap_lambda": 0.0005
+    "fairness_gap_lambda": 0.005
 }

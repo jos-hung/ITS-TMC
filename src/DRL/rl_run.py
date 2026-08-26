@@ -271,12 +271,12 @@ def ddqn(**kwargs):
     ]
     save_dir = os.path.join(os.getcwd(), 'saved_files_global_combine_decay_{}_lr_{}_batch_size_{}_modify_reward_{}_combine_{}_more'.format(ddqn_cfg['epsilon_decay'],ddqn_cfg['learning_rate'],ddqn_cfg['batch_size'],ddqn_cfg['modify_reward'],ddqn_cfg['combine']))
     trainer = create_trainer(env, agents, save_dir, 
-                             thread = config['thread'], 
-                             detach_thread=config['detach_thread'],
-                             score_window_size =  config['score_window_size'],
-                             max_eps_length=config['n_miss_per_vec']*config['n_vehicles'],
-                             update_frequency=ddqn_cfg['batch_size']/4
-                             )
+                            thread = config['thread'], 
+                            detach_thread=config['detach_thread'],
+                            score_window_size =  config['score_window_size'],
+                            max_eps_length=config['n_miss_per_vec']*config['n_vehicles'],
+                            update_frequency=ddqn_cfg['batch_size']/4
+                            )
 
     train_agents(env, trainer, score_window_size = config['score_window_size'])
 

@@ -126,6 +126,34 @@ class RLTrainer:
             for j in range(i + 1, len(r)):
                 sum_squared_diffs += (r[i] - r[j]) ** 2
         return np.sqrt(sum_squared_diffs)
+
+    def _select_action(self, agent, action_scores,agent_type, use_epsilon=False):
+    
+        if isinstance(action_scores, torch.Tensor):
+            score_vec = action_scores.detach().cpu().numpy().reshape(-1)
+        else:
+            score_vec = np.asarray(action_scores).reshape(-1)
+
+        num_actions = score_vec.size
+
+        if num_actions == 0:
+            return -1
+
+        generator = getattr(agent, "generator", np.random.default_rng())
+        epsilon = float(getattr(agent, "epsilon", 0.0))
+
+        greedy_action = int(np.argmax(score_vec))
+
+        # Deterministic policies for evaluation-style selection.
+        if agent_type in {"A2CAgent", "PPOAgent"}:
+            return greedy_action
+
+        # Epsilon-greedy selection for discrete-action agents.
+        if use_epsilon or agent_type in {"DDQNAgent", "DDPGAgent"}:
+            if generator.random() < epsilon:
+                return int(generator.integers(0, num_actions))
+
+        return greedy_action
     
     def run_episode(self):
         """
@@ -157,23 +185,10 @@ class RLTrainer:
                 observationip = np.reshape(states[state], (1, -1))
                 processed_state = torch.from_numpy(observationip).float()
                 action, _ = agent.get_actions(processed_state, idx)
+                action_idx = self._select_action(agent, action[1], agent_type=type(agent).__name__, use_epsilon=False)
                 if any(torch.equal(processed_state, item) for item in processed_states) \
-                    and int(np.argmax(action[1])) in actionssss:
+                    and action_idx in actionssss:
                     continue
-                
-                agent_type = type(agent).__name__
-                LOGIT_CLIP = 10.0
-                if agent_type in ["PPOAgent", "A2CAgent"]:
-                    logits = torch.clamp(action[1], -LOGIT_CLIP, LOGIT_CLIP)
-                    dist = torch.distributions.Categorical(logits=logits)
-                    action_sample = dist.sample()
-                    action_idx = int(action_sample.item())
-                elif agent_type == "DDPGAgent":
-                    noise = torch.normal(0, 0.1, size=action[1].squeeze(0).shape)
-                    action_scores = action[1].squeeze(0) + noise
-                    action_idx = int(torch.argmax(action_scores).item())
-                else:
-                    action_idx = int(np.argmax(action[1]))
                 
                 actionssss.append(action_idx)
                 processed_states.append(processed_state)
@@ -349,28 +364,8 @@ class RLTrainer:
                 observationip = np.reshape(states[state], (1, -1))
                 processed_state = torch.from_numpy(observationip).float()
                 action, _ = agent.get_actions(processed_state, idx)
-                
-                agent_type = type(agent).__name__
-                LOGIT_CLIP = 10.0
-                if agent_type in ["PPOAgent", "A2CAgent"]:
-                    logits = action[1]
-                    print("logits before clip: ", logits) #no clip
-                    dist = torch.distributions.Categorical(logits=logits)
-                    action_sample = dist.sample()
-                    action_idx = int(action_sample.item())
-                    log_prob = dist.log_prob(action_sample)
-                    log_probs.append(log_prob)
-        
-                elif agent_type == "DDPGAgent":
-                    noise = torch.normal(0, 0.1, size=action[1].squeeze(0).shape)
-                    action_scores = action[1].squeeze(0) + noise
-                    action_idx = int(torch.argmax(action_scores).item())
-                    log_probs.append(None)
-                elif agent_type == "DDQNAgent":
-                    action_idx = int(np.argmax(action[1]))
-                    log_probs.append(None)
-                else:
-                    raise ValueError(f"Unsupported agent type: {agent_type}")
+                action_idx = self._select_action_ddqn_style(agent, action[1], use_epsilon=False)
+                log_probs.append(None)
 
                 if any(torch.equal(processed_state, item) for item in processed_states) \
                     and action_idx in actionssss:
@@ -465,31 +460,8 @@ class RLTrainer:
                 observationip = np.reshape(states[state], (1, -1))
                 processed_state = torch.from_numpy(observationip).float()
                 action, _ = agent.get_actions(processed_state, idx)
-                
-                agent_type = type(agent).__name__
-                LOGIT_CLIP = 10.0
-                if agent_type in ["PPOAgent", "A2CAgent"]:
-                    logits = action[1]
-                    print("logits before clip: ", logits) #no clip
-                    dist = torch.distributions.Categorical(logits=logits)
-                    action_sample = dist.sample()
-                    action_idx = int(action_sample.item())
-                    log_prob = dist.log_prob(action_sample)
-                    log_probs.append(log_prob)
-        
-                elif agent_type == "DDPGAgent":
-                    noise = torch.normal(0, 0.1, size=action[1].squeeze(0).shape)
-                    action_scores = action[1].squeeze(0) + noise
-                    action_idx = int(torch.argmax(action_scores).item())
-                    log_probs.append(None)
-                elif agent_type == "DDQNAgent":
-                    if agent.epsilon > agent.generator.random():
-                        action_idx = np.random.randint(0, action[1].shape[1])
-                    else:
-                        action_idx = int(np.argmax(action[1]))
-                    log_probs.append(None)
-                else:
-                    raise ValueError(f"Unsupported agent type: {agent_type}")
+                action_idx = self._select_action(agent, action[1], agent_type=type(agent).__name__)
+                log_probs.append(None)
 
                 if any(torch.equal(processed_state, item) for item in processed_states) \
                     and action_idx in selected_actions_this_step:
@@ -508,13 +480,13 @@ class RLTrainer:
                         if not self.env.is_action_selected(mission_id)
                     ]
                     penalty = -base_penalty
-                    
+                    print(penalty, f"action_idx = {action_idx}","penalty for conflict action selection")
+
                     self.agents[idx].add_memory(processed_state, action_idx, [penalty], processed_state, 0)
                     #random provide a new action from the available actions
                     action_idx = int(np.random.choice(candidate_actions))
                     # scores[idx].append(penalty)
                     # scores[idx].append(penalty)
-                    print(penalty, "penalty for conflict action selection")
                     #add this transition to the memory with the penalty reward
                 selected_actions_this_step.append(action_idx)
                 processed_states.append(processed_state)
@@ -577,9 +549,15 @@ class RLTrainer:
                     head_update = True
                     
                 if self.thread == False:
-                    agent.train_model(head_update)
+                    if type(agent).__name__ == "DDQNAgent":
+                        agent.train_model(head_update)
+                    else:
+                        agent.train_model()
                 else:
-                    update_thread = threading.Thread(target=agent.train_model, args=(head_update,))
+                    if type(agent).__name__ == "DDQNAgent":
+                        update_thread = threading.Thread(target=agent.train_model, args=(head_update,))
+                    else:
+                        update_thread = threading.Thread(target=agent.train_model)
                     if self.detach_thread:
                         update_thread.daemon = True
                         # print("training via a detach thread: {}".format(idx))

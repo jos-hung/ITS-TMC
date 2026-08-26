@@ -17,6 +17,7 @@ from configs.systemcfg import (
     network_cfg,
     apply_early_stopping,
     apply_offloading_based_max_allow_average_delay,
+    dependence_rate
 )
 from physic_definition.map.map import *
 from physic_definition.network.rate import *
@@ -980,40 +981,25 @@ class Vehicle(Observer):
         affection_delay = gap_distance / self.__v_nominal
         return affection_delay
     
-    def _apply_early_stopping_policy(self):
+    def _apply_early_stopping_policy(self, current_mission, all_mission):
         """Proposed 1: selective keep/remove over the affected set when delay propagates."""
         if not self.__apply_early_stopping:
             return 0
+        drop_current_task = False
+        depends_benefits = 0
+        for mis in all_mission:
+            if current_mission.get_mid() in mis.get_depends():
+                depends_benefits += mis.get_profit()
+        
+        after_mission_benefits_in_v_queue = 0
+        for mis in self.__missions:
+            if mis.get_mid() != current_mission.get_mid():
+                after_mission_benefits_in_v_queue += mis.get_profit()
+        
+        if depends_benefits < after_mission_benefits_in_v_queue:
+            drop_current_task = True
 
-        dropped_total = 0
-        while len(self.__ready_mis) > 0:
-            candidate = self.__ready_mis[0]
-            remain_tau = max(0.0, self.__tau - self.__ctrl_time)
-            est_time = self._estimate_mission_time(candidate)
-            if est_time <= remain_tau + 1e-9:
-                break
-
-            affected = self._build_affected_set(candidate.get_mid())
-            if not affected:
-                affected = {candidate.get_mid()}
-
-            retained = self._select_retained_affected_set(affected, remain_tau)
-            to_drop = affected - retained
-            if not to_drop:
-                break
-
-            dropped = self._drop_pending_missions(to_drop)
-            dropped_total += dropped
-
-            if self.verbose:
-                print(f"Vehicle {self.__vid} early-stop pruned {dropped} missions "
-                    f"(affected={len(affected)}, retained={len(retained)})")
-
-            self.verify_ready()
-            if remain_tau <= 0:
-                break
-
-        return dropped_total
+        return drop_current_task
     
     def handle_offloading_with_vehicles_speed(self, offload_task, current_line_of_road, aver_speed, cur_point, trajectory):
         pass
@@ -1035,10 +1021,6 @@ class Vehicle(Observer):
         elif self.__intime == False:
             return
 
-        if self.__apply_early_stopping:
-            self._apply_early_stopping_policy()
-            if len(self.__ready_mis) == 0:
-                return
         # sorted(self.__ready_mis) #sort các nhiệm vụ theo quãng đường thực hiện
         
         cur_mis = self.__ready_mis.pop(0)
@@ -1072,7 +1054,7 @@ class Vehicle(Observer):
         
         endpoint_to_missions = {cur_mis.get_best_road()[-1]: [cur_mis]}
         
-        total_length = cur_mis.get_long()[0]
+        total_length = same_longest_road_mis.get_long()[0]
         trajectory = same_longest_road_mis.get_best_road() 
         segments = self.__map.get_segments()
         completed_cnt = 0
@@ -1199,10 +1181,23 @@ class Vehicle(Observer):
             seg_time = current_road_long / self.__v_nominal
             total_delay += (seg_time + cur_offloading_delay)
             arrived_point = trajectory[0]
-            if processing_time_allow < total_delay and self.__apply_early_stopping:
+            if processing_time_allow > total_delay and self.__apply_early_stopping:
                 #call early stopping policy to remove some mission
-                self._apply_early_stopping_policy()
-            
+                drop = self._apply_early_stopping_policy(current_mission=cur_mis, all_mission=missions)
+                if drop:
+                    if self.verbose:
+                        print(f"Vehicle {self.__vid} dropping mission {cur_mis.get_mid()} due to early stopping policy.")
+                    print(f"Vehicle {self.__vid} dropping mission {cur_mis.get_mid()} due to early stopping policy.")
+                    if same_longest_road_mis in self.__missions:
+                        self.__missions.remove(same_longest_road_mis)
+                    if same_longest_road_mis in self.__ready_mis:
+                        self.__ready_mis.remove(same_longest_road_mis)
+                    if same_longest_road_mis in self.__acceptance_mis:
+                        self.__acceptance_mis.remove(same_longest_road_mis)
+                        
+                    self.__late += 1
+                    
+                    return
             while arrived_point in endpoint_to_missions and len(endpoint_to_missions[arrived_point]) > 0:
                 if self.__ctrl_time + total_delay< self.__tau:
                     completed_cnt += 1
@@ -1240,8 +1235,8 @@ class Vehicle(Observer):
 
         if self.__ctrl_time > self.__tau:
             self.__vehicle_prof -= (len(self.__missions) + len(self.__ready_mis))*50
-            self.__missions = []
-            self.__ready_mis = []
+            # self.__missions = []
+            # self.__ready_mis = []
             self.__intime = False
             if self.verbose:
                 print("Het thoi gian thuc hien nhiem vu") 
@@ -1276,6 +1271,7 @@ class Vehicle(Observer):
             self.__intime = False
             if self.verbose:
                 print("Het thoi gian thuc hien nhiem vu")
+        print("Xe ô tô {} hoàn thành nhiệm vụ {}, số nhiệm vụ hoàn thành {}, số nhiệm vụ còn lại {}, lợi nhuận {}".format(self.__vid, cur_mis.get_mid(), completed_cnt, len(self.__missions), profit))
         return self.__vid, cur_mis.get_mid(), n_remove_depends, len(self.__missions), profit
 
     def get_profit_by_forall_missions(self):
@@ -1457,7 +1453,7 @@ class TaskGenerator:
                         seg_des = seg_dep
                         break
             mem_de = []
-            if self.generator.uniform() >0.4:
+            if self.generator.uniform() < dependence_rate:
                 nums_depends = self.generator.integers(1,3)
                 for k in range(nums_depends):
                     val = self.generator.integers(0, nummissions)
@@ -1516,8 +1512,8 @@ class TaskGenerator:
                 
             
             mem_de = []
-            if self.generator.uniform() >0.4:
-                nums_depends = self.generator.integers(1,3)
+            if self.generator.uniform() < dependence_rate:
+                nums_depends = self.generator.integers(1,4)
                 for k in range(nums_depends):
                     val = self.generator.integers(0, nummissions)
                     while (val == i):

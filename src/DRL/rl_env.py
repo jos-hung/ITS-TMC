@@ -43,7 +43,7 @@ class ITSEnv(gym.Env):
         self._agent_ids = set()
         self.action_space = Box(-np.inf, np.inf, shape=(data["n_missions"],), dtype='float32')
         
-        self.observation_space = Box(-np.inf, np.inf, shape=(2976,1), dtype="float32")                    
+        self.observation_space = Box(-np.inf, np.inf, shape=(7068,1), dtype="float32")                    
         self.action_memory = np.zeros((data["n_missions"],10))
         self.solution =  ['None']*(mission_cfg['n_vehicle']*mission_cfg['n_miss_per_vec'])
         self.max_selection_turn = [self.data['n_miss_per_vec']]*self.data['n_vehicles']

@@ -124,7 +124,12 @@ class PPOAgent(nn.Module):
         self.train_start = self.batch_size
 
         self.memory = deque(maxlen=ppo_cfg["maxlen_mem"])
+        self.global_memory = PPOAgent.global_memory
         self.model_file = checkpoint_path
+        self.generator = np.random.default_rng(GLOBAL_SEED)
+        self.epsilon = ppo_cfg.get("epsilon", 1.0)
+        self.epsilon_decay = ppo_cfg.get("epsilon_decay", 0.99)
+        self.epsilon_min = ppo_cfg.get("epsilon_min", 0.05)
 
         self.actor = _MLP(state_size, action_size).to(device)
         self.critic = _MLP(state_size, 1).to(device)
@@ -152,12 +157,8 @@ class PPOAgent(nn.Module):
 
         with torch.no_grad():
             logits = self.actor(state)
-            dist = torch.distributions.Categorical(logits=logits)
 
-            action = dist.sample()
-            log_prob = dist.log_prob(action)
-
-        return [vid, action.cpu().detach()], log_prob.cpu().detach()
+        return [vid, logits.cpu().detach()], None
 
     def add_memory(self, state, action, reward, next_state, done=0):
         if action == -1:
@@ -220,6 +221,9 @@ class PPOAgent(nn.Module):
     def train_model(self):
         if eval_mode:
             return
+
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
 
         if len(self.memory) < self.update_frequency:
             return
@@ -360,9 +364,9 @@ class A2CAgent(nn.Module):
         self.global_memory = A2CAgent.global_memory
         self.model_file = checkpoint_path
         self.generator = np.random.default_rng(GLOBAL_SEED)
-        self.epsilon = 0.0
-        self.epsilon_decay = 1.0
-        self.epsilon_min = 0.0
+        self.epsilon = a2c_cfg.get("epsilon", 1.0)
+        self.epsilon_decay = a2c_cfg.get("epsilon_decay", 0.99)
+        self.epsilon_min = a2c_cfg.get("epsilon_min", 0.05)
 
         self.actor = _MLP(state_size, action_size).to(device)
         self.critic = _MLP(state_size, 1).to(device)
@@ -411,6 +415,8 @@ class A2CAgent(nn.Module):
     def train_model(self):
         if eval_mode:
             return
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
         if len(self.memory) < self.batch_size:
             return
         self.lock.acquire()
@@ -477,9 +483,9 @@ class DDPGAgent(nn.Module):
         self.global_memory = DDPGAgent.global_memory
         self.model_file = checkpoint_path
         self.generator = np.random.default_rng(GLOBAL_SEED)
-        self.epsilon = 0.0
-        self.epsilon_decay = 1.0
-        self.epsilon_min = 0.0
+        self.epsilon = ddpg_cfg.get("epsilon", 1.0)
+        self.epsilon_decay = ddpg_cfg.get("epsilon_decay", 0.99)
+        self.epsilon_min = ddpg_cfg.get("epsilon_min", 0.05)
 
         self.actor = _MLP(state_size, action_size).to(device)
         self.actor_target = _MLP(state_size, action_size).to(device)
@@ -546,6 +552,8 @@ class DDPGAgent(nn.Module):
     def train_model(self):
         if eval_mode:
             return
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
         if len(self.memory) < self.batch_size:
             return
         self.lock.acquire()

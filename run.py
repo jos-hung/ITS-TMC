@@ -9,7 +9,7 @@ from datetime import datetime
 # exposed across sub-packages (e.g. ppo, mppo, ddqn_ma).
 from src import *
 from src.DRL.rl_eval import eval_ddqn
-from src.DRL.rl_run import ddqn
+from src.DRL.rl_run import A2C, a2c, ddpg, ddqn, ppo
 from src.meta_heuristic.script_many_metaheuristics import many_metaheuristics
 from src.meta_heuristic.script_statistic import get_statistic_results
 from src.meta_heuristic.script_visualize import (
@@ -52,7 +52,7 @@ def parse_arguments():
     """Parse command-line options for execution and result analysis."""
     parser = argparse.ArgumentParser(description='Simulation for ITS Joint task handling and missiong processing paper')
 
-    parser.add_argument('-i', '--input', type=str,choices=['ppo', 'mppo', 'ppo_test', 'A2C', 'ddqn', 'ddqn_ma', 'eval_ddqn', 'many_metaheuristics', 'run_single_agent_ddqn', 'meta_heuristic_proposal', 'None'], required=True, help='Simulation type (DRL or metaheuristic).')
+    parser.add_argument('-i', '--input', type=str,choices=['ppo', 'mppo', 'ppo_test', 'A2C', 'a2c', 'ddpg', 'ddqn', 'ddqn_ma', 'eval_ddqn', 'many_metaheuristics', 'run_single_agent_ddqn', 'meta_heuristic_proposal', 'None'], required=True, help='Simulation type (DRL or metaheuristic).')
     parser.add_argument('-c', '--compare', type=str, choices=['drls', 'drl_and_meta_heuristic_proposal'], help='Compare simulation btw DRL and metaheuristic.')
     parser.add_argument('-a', '--analysis', type = int, help='Analysis result from many meta_heuristics')
     parser.add_argument('-device', '--cuda', type = int, default=-1)
